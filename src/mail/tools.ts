@@ -43,16 +43,17 @@ async function accountMailboxFilter(
   account?: string
 ): Promise<string> {
   const effectiveAccount = account || getDefaultMailAccount();
-  const mailboxName = sqlLikeEscape(mailbox);
+  // Mailbox URLs in the DB are URL-encoded (e.g. Sent%20Items)
+  const encodedMailbox = sqlLikeEscape(encodeURIComponent(mailbox));
 
   if (effectiveAccount) {
     const uuid = await resolveAccountUuid(effectiveAccount);
     if (uuid) {
-      return `mb.url LIKE '%${sqlLikeEscape(uuid)}/${mailboxName}' ESCAPE '\\'`;
+      return `mb.url LIKE '%${sqlLikeEscape(uuid)}/${encodedMailbox}' ESCAPE '\\'`;
     }
   }
   // No account specified or not resolved — match all accounts
-  return `mb.url LIKE '%/${mailboxName}' ESCAPE '\\'`;
+  return `mb.url LIKE '%/${encodedMailbox}' ESCAPE '\\'`;
 }
 
 // ─── Types ───────────────────────────────────────────────────────

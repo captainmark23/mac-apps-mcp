@@ -17,7 +17,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { sqliteQuery } from "../shared/sqlite.js";
+import { sqliteQuery, sqlLikeEscape } from "../shared/sqlite.js";
 
 const MAIL_DIR = join(homedir(), "Library/Mail/V10");
 const MAIL_DB = join(MAIL_DIR, "MailData/Envelope Index");
@@ -28,10 +28,6 @@ const SQLITE3 = "/usr/bin/sqlite3";
 /** Cached account name → UUID map for FTS search. */
 let _ftsAccountMap: Map<string, string> | null = null;
 
-/** Escape a value for use inside a SQL LIKE pattern. Use with ESCAPE '\\'. */
-function sqlLikeEscape(value: string): string {
-  return value.replace(/'/g, "''").replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-}
 
 // ─── .emlx Path Resolution ──────────────────────────────────────
 
@@ -54,13 +50,20 @@ function emlxSubpath(rowid: number): string {
 /**
  * Convert a mailbox URL (e.g. imap://UUID/INBOX) to a filesystem path
  * under ~/Library/Mail/V10/.
+ * Handles URL-encoded names (Sent%20Items → Sent Items.mbox) and
+ * nested paths ([Gmail]/All Mail → [Gmail].mbox/All Mail.mbox).
  */
 function mailboxUrlToDir(url: string): string | null {
-  // imap://UUID/MailboxName or ews://UUID/MailboxName
-  const match = url.match(/^(?:imap|ews|local):\/\/([^/]+)\/(.+)$/);
+  // imap://UUID/MailboxName or ews://UUID/MailboxName or pop://...
+  const match = url.match(/^(?:imap|ews|local|pop):\/\/([^/]+)\/(.+)$/);
   if (!match) return null;
-  const [, accountUuid, mailboxName] = match;
-  return join(MAIL_DIR, accountUuid, `${mailboxName}.mbox`);
+  const [, accountUuid, rawMailboxName] = match;
+  // Decode URL encoding and split nested path segments
+  const decoded = decodeURIComponent(rawMailboxName);
+  const segments = decoded.split("/");
+  // Each segment gets .mbox appended: [Gmail]/All Mail → [Gmail].mbox/All Mail.mbox
+  const mboxPath = segments.map((s) => `${s}.mbox`).join("/");
+  return join(MAIL_DIR, accountUuid, mboxPath);
 }
 
 /**
@@ -390,7 +393,8 @@ export async function searchBody(
   const { getDefaultMailAccount } = await import("../shared/config.js");
   const effectiveAccount = account || getDefaultMailAccount();
 
-  let mbFilter = `mb.url LIKE '%/${sqlLikeEscape(mailbox)}' ESCAPE '\\'`;
+  // Mailbox URLs in the DB are URL-encoded (e.g. Sent%20Items)
+  let mbFilter = `mb.url LIKE '%/${sqlLikeEscape(encodeURIComponent(mailbox))}' ESCAPE '\\'`;
   if (effectiveAccount) {
     try {
       const { executeJxa } = await import("../shared/applescript.js");
@@ -403,7 +407,7 @@ export async function searchBody(
       }
       const uuid = _ftsAccountMap.get(effectiveAccount.toLowerCase());
       if (uuid) {
-        mbFilter = `mb.url LIKE '%${sqlLikeEscape(uuid)}/${sqlLikeEscape(mailbox)}' ESCAPE '\\'`;
+        mbFilter = `mb.url LIKE '%${sqlLikeEscape(uuid)}/${sqlLikeEscape(encodeURIComponent(mailbox))}' ESCAPE '\\'`;
       }
     } catch {
       // Fall through to unfiltered mailbox match

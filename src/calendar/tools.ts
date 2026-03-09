@@ -152,7 +152,7 @@ export async function listCalendars(): Promise<CalendarInfo[]> {
   return rows.map((r) => ({
     name: String(r.title || ""),
     id: String(r.title || ""),
-    writable: r.flags !== 1,
+    writable: (Number(r.flags) & 1) === 0,
     color: String(r.symbolic_color_name || r.color || ""),
   }));
 }

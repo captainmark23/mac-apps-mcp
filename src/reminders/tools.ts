@@ -16,6 +16,7 @@ import { sqliteQuery, sqlEscape } from "../shared/sqlite.js";
 import { getReminderLists } from "../shared/config.js";
 
 const CORE_DATA_EPOCH_OFFSET = 978307200;
+const REMINDER_ID_PREFIX = "x-apple-reminder://";
 
 /**
  * Find the active Reminders SQLite database.
@@ -109,9 +110,9 @@ export async function listReminderLists(): Promise<ReminderList[]> {
   const listFilter = listWhereClause();
   const rows = await sqliteQuery(
     db,
-    `SELECT l.ZNAME, l.ZEXTERNALIDENTIFIER,
+    `SELECT l.ZNAME, l.ZCKIDENTIFIER,
        (SELECT COUNT(*) FROM ZREMCDREMINDER r
-        WHERE r.ZLIST = l.Z_PK AND r.ZMARKEDFORDELETION = 0) as cnt
+        WHERE r.ZLIST = l.Z_PK AND r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0) as cnt
      FROM ZREMCDBASELIST l
      WHERE l.ZMARKEDFORDELETION = 0 AND l.ZNAME IS NOT NULL AND l.ZISGROUP = 0
        ${listFilter}
@@ -120,7 +121,7 @@ export async function listReminderLists(): Promise<ReminderList[]> {
 
   return rows.map((r) => ({
     name: String(r.ZNAME || ""),
-    id: String(r.ZEXTERNALIDENTIFIER || r.ZNAME || ""),
+    id: String(r.ZNAME || ""),
     count: typeof r.cnt === "number" ? r.cnt : parseInt(String(r.cnt || "0"), 10),
   }));
 }
@@ -165,7 +166,7 @@ export async function getReminders(
 
   const rows = await sqliteQuery(
     db,
-    `SELECT r.ZEXTERNALIDENTIFIER, r.ZTITLE, r.ZCOMPLETED, r.ZCOMPLETIONDATE,
+    `SELECT r.ZCKIDENTIFIER, r.ZTITLE, r.ZCOMPLETED, r.ZCOMPLETIONDATE,
        r.ZDUEDATE, r.ZPRIORITY, r.ZFLAGGED, l.ZNAME as list_name
      FROM ZREMCDREMINDER r
      JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK
@@ -179,7 +180,7 @@ export async function getReminders(
   );
 
   return rows.map((r) => ({
-    id: String(r.ZEXTERNALIDENTIFIER || ""),
+    id: REMINDER_ID_PREFIX + String(r.ZCKIDENTIFIER || ""),
     name: String(r.ZTITLE || ""),
     completed: r.ZCOMPLETED === 1 || r.ZCOMPLETED === "1",
     completionDate: fromCoreDataTimestamp(r.ZCOMPLETIONDATE),
@@ -195,15 +196,17 @@ export async function getReminder(
   list: string
 ): Promise<ReminderFull> {
   const db = getRemindersDb();
+  // Strip x-apple-reminder:// prefix if present for DB lookup
+  const ckId = reminderId.replace(REMINDER_ID_PREFIX, "");
 
   const rows = await sqliteQuery(
     db,
-    `SELECT r.ZEXTERNALIDENTIFIER, r.ZTITLE, r.ZCOMPLETED, r.ZCOMPLETIONDATE,
+    `SELECT r.ZCKIDENTIFIER, r.ZTITLE, r.ZCOMPLETED, r.ZCOMPLETIONDATE,
        r.ZDUEDATE, r.ZPRIORITY, r.ZFLAGGED, r.ZNOTES,
        r.ZCREATIONDATE, r.ZLASTMODIFIEDDATE, l.ZNAME as list_name
      FROM ZREMCDREMINDER r
      JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK
-     WHERE r.ZEXTERNALIDENTIFIER = '${sqlEscape(reminderId)}'
+     WHERE r.ZCKIDENTIFIER = '${sqlEscape(ckId)}'
        AND l.ZNAME = '${sqlEscape(list)}'
      LIMIT 1;`
   );
@@ -212,7 +215,7 @@ export async function getReminder(
   const r = rows[0];
 
   return {
-    id: String(r.ZEXTERNALIDENTIFIER || ""),
+    id: REMINDER_ID_PREFIX + String(r.ZCKIDENTIFIER || ""),
     name: String(r.ZTITLE || ""),
     completed: r.ZCOMPLETED === 1 || r.ZCOMPLETED === "1",
     completionDate: fromCoreDataTimestamp(r.ZCOMPLETIONDATE),
