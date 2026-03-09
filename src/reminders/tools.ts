@@ -10,7 +10,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readdirSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { executeJxa, jxaString } from "../shared/applescript.js";
 import { sqliteQuery, sqlEscape } from "../shared/sqlite.js";
 import { getReminderLists } from "../shared/config.js";
@@ -26,13 +26,21 @@ function findRemindersDb(): string {
     homedir(),
     "Library/Group Containers/group.com.apple.reminders/Container_v1/Stores"
   );
-  const files = readdirSync(storesDir).filter((f) => f.endsWith(".sqlite"));
+  let files: string[];
+  try {
+    files = readdirSync(storesDir).filter((f) => f.endsWith(".sqlite"));
+  } catch {
+    throw new Error(`Reminders database directory not found: ${storesDir}`);
+  }
+  if (files.length === 0) {
+    throw new Error(`No .sqlite files found in: ${storesDir}`);
+  }
   // Return the largest file (the one with actual data)
   let best = files[0];
   let bestSize = 0;
   for (const f of files) {
     try {
-      const { size } = require("node:fs").statSync(join(storesDir, f));
+      const { size } = statSync(join(storesDir, f));
       if (size > bestSize) {
         bestSize = size;
         best = f;
@@ -52,6 +60,7 @@ function getRemindersDb(): string {
 function fromCoreDataTimestamp(ts: number | string | null | undefined): string {
   if (ts == null || ts === "") return "";
   const n = typeof ts === "string" ? parseFloat(ts) : ts;
+  if (isNaN(n)) return "";
   return new Date((n + CORE_DATA_EPOCH_OFFSET) * 1000).toISOString();
 }
 
@@ -97,6 +106,7 @@ export interface ReminderFull extends ReminderSummary {
 
 export async function listReminderLists(): Promise<ReminderList[]> {
   const db = getRemindersDb();
+  const listFilter = listWhereClause();
   const rows = await sqliteQuery(
     db,
     `SELECT l.ZNAME, l.ZEXTERNALIDENTIFIER,
@@ -104,6 +114,7 @@ export async function listReminderLists(): Promise<ReminderList[]> {
         WHERE r.ZLIST = l.Z_PK AND r.ZMARKEDFORDELETION = 0) as cnt
      FROM ZREMCDBASELIST l
      WHERE l.ZMARKEDFORDELETION = 0 AND l.ZNAME IS NOT NULL AND l.ZISGROUP = 0
+       ${listFilter}
      ORDER BY l.ZNAME;`
   );
 
@@ -121,6 +132,13 @@ export async function getReminders(
   const db = getRemindersDb();
   const listFilter = listWhereClause(list);
 
+  // Use local timezone for date boundaries
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfDayTs = Math.floor(startOfDay.getTime() / 1000) - CORE_DATA_EPOCH_OFFSET;
+  const endOfDayTs = startOfDayTs + 86400;
+  const nowTs = Math.floor(now.getTime() / 1000) - CORE_DATA_EPOCH_OFFSET;
+
   let filterSql: string;
   switch (filter) {
     case "completed":
@@ -131,12 +149,12 @@ export async function getReminders(
       break;
     case "due_today":
       filterSql = `AND r.ZCOMPLETED = 0 AND r.ZDUEDATE IS NOT NULL
-        AND r.ZDUEDATE >= (strftime('%s','now','start of day') - ${CORE_DATA_EPOCH_OFFSET})
-        AND r.ZDUEDATE < (strftime('%s','now','start of day','+1 day') - ${CORE_DATA_EPOCH_OFFSET})`;
+        AND r.ZDUEDATE >= ${startOfDayTs}
+        AND r.ZDUEDATE < ${endOfDayTs}`;
       break;
     case "overdue":
       filterSql = `AND r.ZCOMPLETED = 0 AND r.ZDUEDATE IS NOT NULL
-        AND r.ZDUEDATE < (strftime('%s','now') - ${CORE_DATA_EPOCH_OFFSET})`;
+        AND r.ZDUEDATE < ${nowTs}`;
       break;
     case "flagged":
       filterSql = "AND r.ZCOMPLETED = 0 AND r.ZFLAGGED = 1";
@@ -156,18 +174,19 @@ export async function getReminders(
        ${listFilter}
      ORDER BY
        CASE WHEN r.ZDUEDATE IS NOT NULL THEN 0 ELSE 1 END,
-       r.ZDUEDATE;`
+       r.ZDUEDATE
+     LIMIT 500;`
   );
 
   return rows.map((r) => ({
     id: String(r.ZEXTERNALIDENTIFIER || ""),
     name: String(r.ZTITLE || ""),
-    completed: r.ZCOMPLETED === 1,
+    completed: r.ZCOMPLETED === 1 || r.ZCOMPLETED === "1",
     completionDate: fromCoreDataTimestamp(r.ZCOMPLETIONDATE),
     dueDate: fromCoreDataTimestamp(r.ZDUEDATE),
     priority: typeof r.ZPRIORITY === "number" ? r.ZPRIORITY : 0,
     list: String(r.list_name || ""),
-    flagged: r.ZFLAGGED === 1,
+    flagged: r.ZFLAGGED === 1 || r.ZFLAGGED === "1",
   }));
 }
 
@@ -195,12 +214,12 @@ export async function getReminder(
   return {
     id: String(r.ZEXTERNALIDENTIFIER || ""),
     name: String(r.ZTITLE || ""),
-    completed: r.ZCOMPLETED === 1,
+    completed: r.ZCOMPLETED === 1 || r.ZCOMPLETED === "1",
     completionDate: fromCoreDataTimestamp(r.ZCOMPLETIONDATE),
     dueDate: fromCoreDataTimestamp(r.ZDUEDATE),
     priority: typeof r.ZPRIORITY === "number" ? r.ZPRIORITY : 0,
     list: String(r.list_name || ""),
-    flagged: r.ZFLAGGED === 1,
+    flagged: r.ZFLAGGED === 1 || r.ZFLAGGED === "1",
     body: String(r.ZNOTES || ""),
     creationDate: fromCoreDataTimestamp(r.ZCREATIONDATE),
     modificationDate: fromCoreDataTimestamp(r.ZLASTMODIFIEDDATE),

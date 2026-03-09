@@ -60,3 +60,12 @@ export async function sqliteQuery<T extends SqliteRow = SqliteRow>(
 export function sqlEscape(value: string): string {
   return value.replace(/'/g, "''");
 }
+
+/**
+ * Escape a string for use inside a SQL LIKE pattern.
+ * Escapes single quotes, and escapes LIKE wildcards with backslash.
+ * Must be used with ESCAPE '\' in the LIKE clause.
+ */
+export function sqlLikeEscape(value: string): string {
+  return value.replace(/'/g, "''").replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}

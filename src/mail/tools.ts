@@ -12,7 +12,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { executeJxa, jxaString } from "../shared/applescript.js";
-import { sqliteQuery, sqlEscape } from "../shared/sqlite.js";
+import { sqliteQuery, sqlEscape, sqlLikeEscape } from "../shared/sqlite.js";
 import { getDefaultMailAccount } from "../shared/config.js";
 
 const MAIL_DB = join(homedir(), "Library/Mail/V10/MailData/Envelope Index");
@@ -43,16 +43,16 @@ async function accountMailboxFilter(
   account?: string
 ): Promise<string> {
   const effectiveAccount = account || getDefaultMailAccount();
-  const mailboxName = sqlEscape(mailbox);
+  const mailboxName = sqlLikeEscape(mailbox);
 
   if (effectiveAccount) {
     const uuid = await resolveAccountUuid(effectiveAccount);
     if (uuid) {
-      return `mb.url LIKE '%${sqlEscape(uuid)}/${mailboxName}'`;
+      return `mb.url LIKE '%${sqlLikeEscape(uuid)}/${mailboxName}' ESCAPE '\\'`;
     }
   }
   // No account specified or not resolved — match all accounts
-  return `mb.url LIKE '%/${mailboxName}'`;
+  return `mb.url LIKE '%/${mailboxName}' ESCAPE '\\'`;
 }
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -252,16 +252,16 @@ export async function searchMail(
   account?: string,
   limit = 20
 ): Promise<EmailSummary[]> {
-  const safeQuery = sqlEscape(query.toLowerCase());
+  const safeQuery = sqlLikeEscape(query.toLowerCase());
   const mbFilter = await accountMailboxFilter(mailbox, account);
 
   let scopeSql: string;
   if (scope === "subject") {
-    scopeSql = `AND LOWER(s.subject) LIKE '%${safeQuery}%'`;
+    scopeSql = `AND LOWER(s.subject) LIKE '%${safeQuery}%' ESCAPE '\\'`;
   } else if (scope === "sender") {
-    scopeSql = `AND LOWER(a.address) LIKE '%${safeQuery}%'`;
+    scopeSql = `AND LOWER(a.address) LIKE '%${safeQuery}%' ESCAPE '\\'`;
   } else {
-    scopeSql = `AND (LOWER(s.subject) LIKE '%${safeQuery}%' OR LOWER(a.address) LIKE '%${safeQuery}%')`;
+    scopeSql = `AND (LOWER(s.subject) LIKE '%${safeQuery}%' ESCAPE '\\' OR LOWER(a.address) LIKE '%${safeQuery}%' ESCAPE '\\')`;
   }
 
   const rows = await sqliteQuery(
@@ -305,14 +305,14 @@ export async function sendEmail(
     : `const acct = Mail.accounts[0];`;
 
   const ccBlock = cc?.length
-    ? `for (const addr of ${jxaString(JSON.stringify(cc))}) {
+    ? `for (const addr of JSON.parse(${jxaString(JSON.stringify(cc))})) {
          const r = Mail.CcRecipient({ address: addr });
          msg.ccRecipients.push(r);
        }`
     : "";
 
   const bccBlock = bcc?.length
-    ? `for (const addr of ${jxaString(JSON.stringify(bcc))}) {
+    ? `for (const addr of JSON.parse(${jxaString(JSON.stringify(bcc))})) {
          const r = Mail.BccRecipient({ address: addr });
          msg.bccRecipients.push(r);
        }`

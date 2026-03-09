@@ -97,6 +97,7 @@ function toCoreDataTimestamp(dateStr: string): number {
 function fromCoreDataTimestamp(ts: number | string | null | undefined): string {
   if (ts == null || ts === "") return "";
   const n = typeof ts === "string" ? parseFloat(ts) : ts;
+  if (isNaN(n)) return "";
   return new Date((n + CORE_DATA_EPOCH_OFFSET) * 1000).toISOString();
 }
 
@@ -188,35 +189,20 @@ export async function getEvents(
 export async function getEventsToday(
   calendar?: string
 ): Promise<EventSummary[]> {
-  const calFilter = calendarWhereClause(calendar);
-
-  const rows = await sqliteQuery(
-    CALENDAR_DB,
-    `${EVENT_SELECT}
-     WHERE oc.day >= (strftime('%s','now','start of day') - ${CORE_DATA_EPOCH_OFFSET})
-       AND oc.day < (strftime('%s','now','start of day','+1 day') - ${CORE_DATA_EPOCH_OFFSET})
-       ${calFilter}
-     ORDER BY computed_start;`
-  );
-
-  return rows.map(rowToEventSummary);
+  // Use JS Date for local timezone start/end of day
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const endOfDay = new Date(startOfDay.getTime() + 86400_000);
+  return getEvents(startOfDay.toISOString(), endOfDay.toISOString(), calendar);
 }
 
 export async function getEventsThisWeek(
   calendar?: string
 ): Promise<EventSummary[]> {
-  const calFilter = calendarWhereClause(calendar);
-
-  const rows = await sqliteQuery(
-    CALENDAR_DB,
-    `${EVENT_SELECT}
-     WHERE oc.day >= (strftime('%s','now','start of day') - ${CORE_DATA_EPOCH_OFFSET})
-       AND oc.day < (strftime('%s','now','start of day','+7 days') - ${CORE_DATA_EPOCH_OFFSET})
-       ${calFilter}
-     ORDER BY computed_start;`
-  );
-
-  return rows.map(rowToEventSummary);
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const endOfWeek = new Date(startOfDay.getTime() + 7 * 86400_000);
+  return getEvents(startOfDay.toISOString(), endOfWeek.toISOString(), calendar);
 }
 
 export async function getEvent(
@@ -228,7 +214,14 @@ export async function getEvent(
     `SELECT ci.ROWID as item_rowid, ci.UUID, ci.summary, ci.all_day, ci.status,
        ci.start_date, ci.end_date, ci.description, ci.url, ci.has_recurrences,
        c.title as calendar_name,
-       COALESCE((SELECT l.title FROM Location l WHERE l.ROWID = ci.location_id), '') as location
+       COALESCE((SELECT l.title FROM Location l WHERE l.ROWID = ci.location_id), '') as location,
+       (SELECT CASE
+         WHEN ci.all_day = 1 THEN oc2.day
+         ELSE oc2.occurrence_end_date - (ci.end_date - ci.start_date)
+       END FROM OccurrenceCache oc2
+       WHERE oc2.event_id = ci.ROWID ORDER BY oc2.occurrence_end_date DESC LIMIT 1) as latest_start,
+       (SELECT oc2.occurrence_end_date FROM OccurrenceCache oc2
+       WHERE oc2.event_id = ci.ROWID ORDER BY oc2.occurrence_end_date DESC LIMIT 1) as latest_end
      FROM CalendarItem ci
      JOIN Calendar c ON ci.calendar_id = c.ROWID
      WHERE ci.UUID = '${sqlEscape(eventId)}'
@@ -261,11 +254,19 @@ export async function getEvent(
     }
   }
 
+  // Use occurrence dates if available (for recurring events), fall back to series dates
+  const startDate = r.latest_start != null
+    ? fromCoreDataTimestamp(r.latest_start)
+    : fromCoreDataTimestamp(r.start_date);
+  const endDate = r.latest_end != null
+    ? fromCoreDataTimestamp(r.latest_end)
+    : fromCoreDataTimestamp(r.end_date);
+
   return {
     id: String(r.UUID || ""),
     summary: String(r.summary || ""),
-    startDate: fromCoreDataTimestamp(r.start_date),
-    endDate: fromCoreDataTimestamp(r.end_date),
+    startDate,
+    endDate,
     location: String(r.location || ""),
     allDay: r.all_day === 1 || r.all_day === "1",
     calendar: String(r.calendar_name || ""),

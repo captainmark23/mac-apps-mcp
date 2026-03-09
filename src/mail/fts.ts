@@ -13,17 +13,25 @@
  *   mail-fts.db (our DB) → FTS5 index of body text, keyed by message ROWID
  */
 
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { sqliteQuery, sqlEscape } from "../shared/sqlite.js";
+import { sqliteQuery } from "../shared/sqlite.js";
 
 const MAIL_DIR = join(homedir(), "Library/Mail/V10");
 const MAIL_DB = join(MAIL_DIR, "MailData/Envelope Index");
 const FTS_DIR = join(homedir(), ".macos-mcp");
 const FTS_DB = join(FTS_DIR, "mail-fts.db");
 const SQLITE3 = "/usr/bin/sqlite3";
+
+/** Cached account name → UUID map for FTS search. */
+let _ftsAccountMap: Map<string, string> | null = null;
+
+/** Escape a value for use inside a SQL LIKE pattern. Use with ESCAPE '\\'. */
+function sqlLikeEscape(value: string): string {
+  return value.replace(/'/g, "''").replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
 
 // ─── .emlx Path Resolution ──────────────────────────────────────
 
@@ -89,17 +97,17 @@ function resolveEmlxPath(rowid: number, mailboxUrl: string): string | null {
  * Format: first line is byte count, then RFC 822 email, then Apple plist metadata.
  */
 function parseEmlxBody(filePath: string): string {
-  const raw = readFileSync(filePath, "utf-8");
+  const buf = readFileSync(filePath);
 
   // First line is the byte count of the email portion
-  const firstNewline = raw.indexOf("\n");
+  const firstNewline = buf.indexOf(0x0a); // '\n'
   if (firstNewline === -1) return "";
-  const byteCount = parseInt(raw.substring(0, firstNewline).trim(), 10);
+  const byteCount = parseInt(buf.subarray(0, firstNewline).toString("utf-8").trim(), 10);
   if (isNaN(byteCount)) return "";
 
-  // Extract the email portion (skip byte count line)
+  // Extract the email portion using byte offsets, then decode to string
   const emailStart = firstNewline + 1;
-  const emailContent = raw.substring(emailStart, emailStart + byteCount);
+  const emailContent = buf.subarray(emailStart, emailStart + byteCount).toString("utf-8");
 
   // Split headers from body (double newline separates them)
   const headerEnd = emailContent.indexOf("\r\n\r\n");
@@ -117,21 +125,24 @@ function parseEmlxBody(filePath: string): string {
     splitPos + (emailContent[splitPos] === "\r" ? 4 : 2)
   );
 
-  // Strip HTML tags and decode common entities
-  return stripHtml(body);
+  return body;
 }
 
 /**
- * Decode quoted-printable encoding.
+ * Decode quoted-printable encoding, handling multi-byte UTF-8 sequences.
  */
 function decodeQuotedPrintable(text: string): string {
-  return text
-    // Soft line breaks (= at end of line)
-    .replace(/=\r?\n/g, "")
-    // Encoded bytes
-    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>
-      String.fromCharCode(parseInt(hex, 16))
-    );
+  // Remove soft line breaks first
+  const cleaned = text.replace(/=\r?\n/g, "");
+  // Collect encoded byte sequences and decode as UTF-8
+  return cleaned.replace(/(?:=[0-9A-Fa-f]{2})+/g, (match) => {
+    const bytes = match.split("=").filter(Boolean).map((hex) => parseInt(hex, 16));
+    try {
+      return Buffer.from(bytes).toString("utf-8");
+    } catch {
+      return match;
+    }
+  });
 }
 
 /**
@@ -162,11 +173,12 @@ function stripHtml(html: string): string {
 
 /**
  * Clean and truncate email body for indexing.
+ * Pipeline: decode QP → strip HTML → remove noise → truncate.
  */
 function cleanBodyForIndex(raw: string): string {
-  // Decode quoted-printable if present
+  // Decode quoted-printable first so HTML tags are visible for stripping
   let text = decodeQuotedPrintable(raw);
-  // Strip HTML
+  // Strip HTML once
   text = stripHtml(text);
   // Remove long URLs
   text = text.replace(/https?:\/\/\S{50,}/g, "");
@@ -317,7 +329,6 @@ export async function rebuildIndex(batchSize = 5000): Promise<{
 }> {
   // Drop and recreate
   if (existsSync(FTS_DB)) {
-    const { unlinkSync } = await import("node:fs");
     unlinkSync(FTS_DB);
     // Also remove WAL/SHM files
     try { unlinkSync(FTS_DB + "-wal"); } catch {}
@@ -379,29 +390,37 @@ export async function searchBody(
   const { getDefaultMailAccount } = await import("../shared/config.js");
   const effectiveAccount = account || getDefaultMailAccount();
 
-  let mbFilter = `mb.url LIKE '%/${sqlEscape(mailbox)}'`;
+  let mbFilter = `mb.url LIKE '%/${sqlLikeEscape(mailbox)}' ESCAPE '\\'`;
   if (effectiveAccount) {
     try {
       const { executeJxa } = await import("../shared/applescript.js");
-      let _accountMap: Map<string, string> | null = null;
-      if (!_accountMap) {
+      if (!_ftsAccountMap) {
         const accounts = await executeJxa<{ name: string; id: string }[]>(`
           const Mail = Application("Mail");
           JSON.stringify(Mail.accounts().map(a => ({ name: a.name(), id: a.id() })));
         `);
-        _accountMap = new Map(accounts.map((a) => [a.name.toLowerCase(), a.id]));
+        _ftsAccountMap = new Map(accounts.map((a) => [a.name.toLowerCase(), a.id]));
       }
-      const uuid = _accountMap.get(effectiveAccount.toLowerCase());
+      const uuid = _ftsAccountMap.get(effectiveAccount.toLowerCase());
       if (uuid) {
-        mbFilter = `mb.url LIKE '%${sqlEscape(uuid)}/${sqlEscape(mailbox)}'`;
+        mbFilter = `mb.url LIKE '%${sqlLikeEscape(uuid)}/${sqlLikeEscape(mailbox)}' ESCAPE '\\'`;
       }
     } catch {
       // Fall through to unfiltered mailbox match
     }
   }
 
-  // FTS5 query — escape double quotes in user query
-  const safeQuery = query.replace(/"/g, '""');
+  // Sanitize FTS5 query: strip all quotes and FTS5 special characters
+  const safeQuery = query
+    .replace(/["'""''*+\-^{}():<>]/g, " ")
+    .replace(/\b(AND|OR|NOT|NEAR)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!safeQuery) return [];
+
+  // Use hex encoding for the FTS5 MATCH phrase to avoid any SQL quoting issues
+  const matchPhrase = `"${safeQuery}"`;
+  const matchHex = Buffer.from(matchPhrase, "utf-8").toString("hex");
 
   // We query FTS for matching rowids, then join with Envelope Index for metadata
   // This requires a two-step approach since the databases are separate
@@ -409,7 +428,7 @@ export async function searchBody(
     FTS_DB,
     `SELECT rowid, snippet(email_fts, 0, '>>>', '<<<', '...', 40) as snippet
      FROM email_fts
-     WHERE email_fts MATCH '"${safeQuery}"'
+     WHERE email_fts MATCH CAST(X'${matchHex}' AS TEXT)
      ORDER BY rank
      LIMIT ${limit * 3};`
   );
