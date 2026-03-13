@@ -24,7 +24,7 @@ System Settings → Privacy & Security → Full Disk Access → add your termina
 ## Installation
 
 ```bash
-git clone https://github.com/youruser/macos-mcp.git
+git clone https://github.com/captainmark23/macos-mcp.git
 cd macos-mcp
 npm install
 npm run build

@@ -83,3 +83,25 @@ export function jxaString(value: string): string {
 export function jxaStringArray(values: string[]): string {
   return JSON.stringify(values);
 }
+
+// ─── JXA Write Queue ─────────────────────────────────────────────
+
+/**
+ * Serial queue for JXA write operations.
+ * Prevents overwhelming macOS apps (Mail, Calendar, Reminders)
+ * when an agent fires multiple write calls rapidly.
+ * Read operations bypass the queue since they use SQLite.
+ */
+let _writeQueueTail: Promise<unknown> = Promise.resolve();
+
+export async function executeJxaWrite<T = unknown>(
+  script: string,
+  opts?: ExecOptions
+): Promise<T> {
+  const task = _writeQueueTail.then(
+    () => executeJxa<T>(script, opts),
+    () => executeJxa<T>(script, opts) // proceed even if prior write failed
+  );
+  _writeQueueTail = task.catch(() => {}); // swallow to keep chain alive
+  return task;
+}
