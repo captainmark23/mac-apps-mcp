@@ -11,9 +11,10 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readdirSync, statSync } from "node:fs";
-import { executeJxa, jxaString } from "../shared/applescript.js";
+import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
 import { sqliteQuery, sqlEscape } from "../shared/sqlite.js";
 import { getReminderLists } from "../shared/config.js";
+import { PaginatedResult, paginateRows } from "../shared/types.js";
 
 const CORE_DATA_EPOCH_OFFSET = 978307200;
 const REMINDER_ID_PREFIX = "x-apple-reminder://";
@@ -103,6 +104,9 @@ export interface ReminderFull extends ReminderSummary {
   modificationDate: string;
 }
 
+// PaginatedResult<T> imported from shared/types.ts
+export type { PaginatedResult } from "../shared/types.js";
+
 // ─── Read Tools (SQLite — instant) ──────────────────────────────
 
 export async function listReminderLists(): Promise<ReminderList[]> {
@@ -128,8 +132,10 @@ export async function listReminderLists(): Promise<ReminderList[]> {
 
 export async function getReminders(
   list?: string,
-  filter: "all" | "incomplete" | "completed" | "due_today" | "overdue" | "flagged" = "incomplete"
-): Promise<ReminderSummary[]> {
+  filter: "all" | "incomplete" | "completed" | "due_today" | "overdue" | "flagged" = "incomplete",
+  limit = 50,
+  offset = 0
+): Promise<PaginatedResult<ReminderSummary>> {
   const db = getRemindersDb();
   const listFilter = listWhereClause(list);
 
@@ -164,22 +170,36 @@ export async function getReminders(
       filterSql = "AND r.ZCOMPLETED = 0";
   }
 
-  const rows = await sqliteQuery(
-    db,
-    `SELECT r.ZCKIDENTIFIER, r.ZTITLE, r.ZCOMPLETED, r.ZCOMPLETIONDATE,
-       r.ZDUEDATE, r.ZPRIORITY, r.ZFLAGGED, l.ZNAME as list_name
-     FROM ZREMCDREMINDER r
-     JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK
-     WHERE r.ZMARKEDFORDELETION = 0
-       ${filterSql}
-       ${listFilter}
-     ORDER BY
-       CASE WHEN r.ZDUEDATE IS NOT NULL THEN 0 ELSE 1 END,
-       r.ZDUEDATE
-     LIMIT 500;`
-  );
+  const baseWhere = `r.ZMARKEDFORDELETION = 0 ${filterSql} ${listFilter}`;
 
-  return rows.map((r) => ({
+  const [rows, countRows] = await Promise.all([
+    sqliteQuery(
+      db,
+      `SELECT r.ZCKIDENTIFIER, r.ZTITLE, r.ZCOMPLETED, r.ZCOMPLETIONDATE,
+         r.ZDUEDATE, r.ZPRIORITY, r.ZFLAGGED, l.ZNAME as list_name
+       FROM ZREMCDREMINDER r
+       JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK
+       WHERE ${baseWhere}
+       ORDER BY
+         CASE WHEN r.ZDUEDATE IS NOT NULL THEN 0 ELSE 1 END,
+         r.ZDUEDATE
+       LIMIT ${limit} OFFSET ${offset};`
+    ),
+    sqliteQuery(
+      db,
+      `SELECT COUNT(*) as total
+       FROM ZREMCDREMINDER r
+       JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK
+       WHERE ${baseWhere};`
+    ),
+  ]);
+
+  const total =
+    typeof countRows[0]?.total === "number"
+      ? countRows[0].total
+      : parseInt(String(countRows[0]?.total || "0"), 10);
+
+  const items = rows.map((r) => ({
     id: REMINDER_ID_PREFIX + String(r.ZCKIDENTIFIER || ""),
     name: String(r.ZTITLE || ""),
     completed: r.ZCOMPLETED === 1 || r.ZCOMPLETED === "1",
@@ -189,6 +209,8 @@ export async function getReminders(
     list: String(r.list_name || ""),
     flagged: r.ZFLAGGED === 1 || r.ZFLAGGED === "1",
   }));
+
+  return paginateRows(items, total, offset);
 }
 
 export async function getReminder(
@@ -229,7 +251,7 @@ export async function getReminder(
   };
 }
 
-// ─── Write Tools (JXA — requires Reminders.app) ─────────────────
+// ─── Write Tools (JXA — requires Reminders.app, serialized via queue) ─
 
 export async function createReminder(
   name: string,
@@ -248,7 +270,7 @@ export async function createReminder(
   if (priority !== undefined) props.push(`priority: ${priority}`);
   if (flagged !== undefined) props.push(`flagged: ${flagged}`);
 
-  return executeJxa(`
+  return executeJxaWrite(`
     const Rem = Application("Reminders");
     ${listSetup}
     const r = Rem.Reminder({
@@ -264,7 +286,7 @@ export async function completeReminder(
   reminderId: string,
   list: string
 ): Promise<{ success: boolean }> {
-  return executeJxa(`
+  return executeJxaWrite(`
     const Rem = Application("Reminders");
     const l = Rem.lists.byName(${jxaString(list)});
     const r = l.reminders.byId(${jxaString(reminderId)});
@@ -277,7 +299,7 @@ export async function deleteReminder(
   reminderId: string,
   list: string
 ): Promise<{ success: boolean }> {
-  return executeJxa(`
+  return executeJxaWrite(`
     const Rem = Application("Reminders");
     const l = Rem.lists.byName(${jxaString(list)});
     const r = l.reminders.byId(${jxaString(reminderId)});

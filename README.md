@@ -24,7 +24,7 @@ System Settings → Privacy & Security → Full Disk Access → add your termina
 ## Installation
 
 ```bash
-git clone https://github.com/youruser/macos-mcp.git
+git clone https://github.com/captainmark23/macos-mcp.git
 cd macos-mcp
 npm install
 npm run build
@@ -151,6 +151,41 @@ src/
 **Read operations** query macOS SQLite databases directly via the system `sqlite3` binary with `-json -readonly` flags. This is orders of magnitude faster than AppleScript/JXA — calendar queries that took 1:46 via JXA complete in 14ms via SQLite.
 
 **Write operations** use JXA (JavaScript for Automation) via `osascript`, which properly interfaces with the app APIs and respects macOS sandboxing.
+
+## Troubleshooting
+
+### Full Disk Access errors
+
+If you see `SQLite error: unable to open database file` or similar permission errors, your terminal (or Claude Desktop) needs Full Disk Access:
+
+**System Settings → Privacy & Security → Full Disk Access** → toggle on your terminal app and/or Claude Desktop. Restart the app after granting access.
+
+### Automation / privacy permissions
+
+Write operations (sending mail, creating events/reminders) use JXA which requires Automation access. If you see `-1743` errors or "not allowed assistive access":
+
+**System Settings → Privacy & Security → Automation** → ensure your terminal/Claude Desktop has permission for Mail, Calendar, and Reminders.
+
+### Reminders database not found
+
+If `reminders_*` tools return "database directory not found", the Reminders container may not exist yet. Open Reminders.app once and create at least one reminder to initialize the database.
+
+### SQLite query timed out
+
+Queries have a 10-second timeout by default. If you hit this on large mailboxes, try narrowing your search with filters (e.g., `filter: "today"`) or reducing the `limit` parameter.
+
+### Node.js version
+
+Requires Node.js 20+. Check with `node --version`. If you're on an older version, install a current LTS release via [nvm](https://github.com/nvm-sh/nvm) or [Homebrew](https://brew.sh).
+
+### FTS index issues
+
+If `mail_search_body` returns no results, you need to build the FTS index first:
+
+1. Run `mail_fts_index` (incremental — only indexes new messages)
+2. Or run `mail_fts_index` with `rebuild=true` for a full re-index
+
+The index is stored at `~/.macos-mcp/mail-fts.db` and can be safely deleted to start fresh.
 
 ## License
 

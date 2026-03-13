@@ -11,9 +11,10 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { executeJxa, jxaString } from "../shared/applescript.js";
+import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
 import { sqliteQuery, sqlEscape } from "../shared/sqlite.js";
 import { getCalendarNames } from "../shared/config.js";
+import { PaginatedResult, paginateArray } from "../shared/types.js";
 
 /**
  * macOS stores Calendar data in a SQLite database.
@@ -72,6 +73,9 @@ export interface EventFull extends EventSummary {
   recurrence: string;
   attendees: { name: string; email: string; status: string }[];
 }
+
+// PaginatedResult<T> imported from shared/types.ts
+export type { PaginatedResult } from "../shared/types.js";
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -160,8 +164,10 @@ export async function listCalendars(): Promise<CalendarInfo[]> {
 export async function getEvents(
   startDate: string,
   endDate: string,
-  calendar?: string
-): Promise<EventSummary[]> {
+  calendar?: string,
+  limit = 200,
+  offset = 0
+): Promise<PaginatedResult<EventSummary>> {
   const startTs = toCoreDataTimestamp(startDate);
   const endTs = toCoreDataTimestamp(endDate);
   const calFilter = calendarWhereClause(calendar);
@@ -176,7 +182,7 @@ export async function getEvents(
   );
 
   // Post-filter for precise range (day column is date-granularity)
-  return rows
+  const allItems = rows
     .map(rowToEventSummary)
     .filter((e) => {
       const start = new Date(e.startDate).getTime();
@@ -184,25 +190,30 @@ export async function getEvents(
       const eMs = new Date(endDate).getTime();
       return start >= sMs && start < eMs;
     });
+
+  return paginateArray(allItems, offset, limit);
 }
 
 export async function getEventsToday(
-  calendar?: string
-): Promise<EventSummary[]> {
-  // Use JS Date for local timezone start/end of day
+  calendar?: string,
+  limit = 200,
+  offset = 0
+): Promise<PaginatedResult<EventSummary>> {
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const endOfDay = new Date(startOfDay.getTime() + 86400_000);
-  return getEvents(startOfDay.toISOString(), endOfDay.toISOString(), calendar);
+  return getEvents(startOfDay.toISOString(), endOfDay.toISOString(), calendar, limit, offset);
 }
 
 export async function getEventsThisWeek(
-  calendar?: string
-): Promise<EventSummary[]> {
+  calendar?: string,
+  limit = 200,
+  offset = 0
+): Promise<PaginatedResult<EventSummary>> {
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const endOfWeek = new Date(startOfDay.getTime() + 7 * 86400_000);
-  return getEvents(startOfDay.toISOString(), endOfWeek.toISOString(), calendar);
+  return getEvents(startOfDay.toISOString(), endOfWeek.toISOString(), calendar, limit, offset);
 }
 
 export async function getEvent(
@@ -282,7 +293,7 @@ export async function getEvent(
   };
 }
 
-// ─── Write Tools (JXA — requires Calendar.app) ─────────────────
+// ─── Write Tools (JXA — requires Calendar.app, serialized via queue) ─
 
 export async function createEvent(
   summary: string,
@@ -297,7 +308,7 @@ export async function createEvent(
     ? `const cal = Cal.calendars.byName(${jxaString(calendar)});`
     : `const cal = Cal.calendars()[0];`;
 
-  return executeJxa(`
+  return executeJxaWrite(`
     const Cal = Application("Calendar");
     ${calSetup}
     const props = {
@@ -337,7 +348,7 @@ export async function modifyEvent(
   if (updates.description !== undefined)
     ops.push(`e.description = ${jxaString(updates.description)};`);
 
-  return executeJxa(`
+  return executeJxaWrite(`
     const Cal = Application("Calendar");
     const cal = Cal.calendars.byName(${jxaString(calendar)});
     const matches = cal.events.whose({ uid: ${jxaString(eventId)} })();
@@ -352,7 +363,7 @@ export async function deleteEvent(
   eventId: string,
   calendar: string
 ): Promise<{ success: boolean }> {
-  return executeJxa(`
+  return executeJxaWrite(`
     const Cal = Application("Calendar");
     const cal = Cal.calendars.byName(${jxaString(calendar)});
     const matches = cal.events.whose({ uid: ${jxaString(eventId)} })();

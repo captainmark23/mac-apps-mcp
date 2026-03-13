@@ -18,15 +18,12 @@ import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { sqliteQuery, sqlLikeEscape } from "../shared/sqlite.js";
+import { getMailDbPath, getMailDir, resolveMailAccountUuid, getDefaultMailAccount } from "../shared/config.js";
+import { PaginatedResult, paginateRows } from "../shared/types.js";
 
-const MAIL_DIR = join(homedir(), "Library/Mail/V10");
-const MAIL_DB = join(MAIL_DIR, "MailData/Envelope Index");
 const FTS_DIR = join(homedir(), ".macos-mcp");
 const FTS_DB = join(FTS_DIR, "mail-fts.db");
 const SQLITE3 = "/usr/bin/sqlite3";
-
-/** Cached account name → UUID map for FTS search. */
-let _ftsAccountMap: Map<string, string> | null = null;
 
 
 // ─── .emlx Path Resolution ──────────────────────────────────────
@@ -63,7 +60,7 @@ function mailboxUrlToDir(url: string): string | null {
   const segments = decoded.split("/");
   // Each segment gets .mbox appended: [Gmail]/All Mail → [Gmail].mbox/All Mail.mbox
   const mboxPath = segments.map((s) => `${s}.mbox`).join("/");
-  return join(MAIL_DIR, accountUuid, mboxPath);
+  return join(getMailDir(), accountUuid, mboxPath);
 }
 
 /**
@@ -264,7 +261,7 @@ export async function indexNewMessages(limit = 5000): Promise<{
 
   // Get new messages from Envelope Index
   const messages = await sqliteQuery(
-    MAIL_DB,
+    getMailDbPath(),
     `SELECT m.ROWID, mb.url as mailbox_url
      FROM messages m
      JOIN mailboxes mb ON m.mailbox = mb.ROWID
@@ -341,7 +338,7 @@ export async function rebuildIndex(batchSize = 5000): Promise<{
 
   // Get total message count
   const countRows = await sqliteQuery(
-    MAIL_DB,
+    getMailDbPath(),
     `SELECT COUNT(*) as cnt FROM messages WHERE deleted = 0;`
   );
   const totalMessages =
@@ -378,41 +375,44 @@ export interface FtsSearchResult {
 }
 
 /**
- * Search email body content using FTS5.
- * Returns results sorted by date (newest first) with text snippets.
+ * Build a mailbox URL filter for use in Envelope Index queries.
+ * Uses the shared account resolver from config.ts.
  */
-export async function searchBody(
-  query: string,
-  mailbox = "INBOX",
-  account?: string,
-  limit = 20
-): Promise<FtsSearchResult[]> {
-  ensureFtsDb();
-
-  // Build mailbox filter
-  const { getDefaultMailAccount } = await import("../shared/config.js");
+async function ftsMailboxFilter(
+  mailbox: string,
+  account?: string
+): Promise<string> {
   const effectiveAccount = account || getDefaultMailAccount();
+  const encodedMailbox = sqlLikeEscape(encodeURIComponent(mailbox));
 
-  // Mailbox URLs in the DB are URL-encoded (e.g. Sent%20Items)
-  let mbFilter = `mb.url LIKE '%/${sqlLikeEscape(encodeURIComponent(mailbox))}' ESCAPE '\\'`;
   if (effectiveAccount) {
     try {
       const { executeJxa } = await import("../shared/applescript.js");
-      if (!_ftsAccountMap) {
-        const accounts = await executeJxa<{ name: string; id: string }[]>(`
-          const Mail = Application("Mail");
-          JSON.stringify(Mail.accounts().map(a => ({ name: a.name(), id: a.id() })));
-        `);
-        _ftsAccountMap = new Map(accounts.map((a) => [a.name.toLowerCase(), a.id]));
-      }
-      const uuid = _ftsAccountMap.get(effectiveAccount.toLowerCase());
+      const uuid = await resolveMailAccountUuid(effectiveAccount, executeJxa);
       if (uuid) {
-        mbFilter = `mb.url LIKE '%${sqlLikeEscape(uuid)}/${sqlLikeEscape(encodeURIComponent(mailbox))}' ESCAPE '\\'`;
+        return `mb.url LIKE '%${sqlLikeEscape(uuid)}/${encodedMailbox}' ESCAPE '\\'`;
       }
     } catch {
       // Fall through to unfiltered mailbox match
     }
   }
+  return `mb.url LIKE '%/${encodedMailbox}' ESCAPE '\\'`;
+}
+
+/**
+ * Search email body content using FTS5.
+ * Returns results sorted by date (newest first) with text snippets and pagination.
+ */
+export async function searchBody(
+  query: string,
+  mailbox = "INBOX",
+  account?: string,
+  limit = 20,
+  offset = 0
+): Promise<PaginatedResult<FtsSearchResult>> {
+  ensureFtsDb();
+
+  const mbFilter = await ftsMailboxFilter(mailbox, account);
 
   // Sanitize FTS5 query: strip all quotes and FTS5 special characters
   const safeQuery = query
@@ -420,42 +420,57 @@ export async function searchBody(
     .replace(/\b(AND|OR|NOT|NEAR)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (!safeQuery) return [];
+  if (!safeQuery) return paginateRows([], 0, offset);
 
   // Use hex encoding for the FTS5 MATCH phrase to avoid any SQL quoting issues
   const matchPhrase = `"${safeQuery}"`;
   const matchHex = Buffer.from(matchPhrase, "utf-8").toString("hex");
 
-  // We query FTS for matching rowids, then join with Envelope Index for metadata
-  // This requires a two-step approach since the databases are separate
+  // Query FTS for matching rowids — fetch extra to account for mailbox filtering
   const ftsResults = await sqliteQuery(
     FTS_DB,
     `SELECT rowid, snippet(email_fts, 0, '>>>', '<<<', '...', 40) as snippet
      FROM email_fts
      WHERE email_fts MATCH CAST(X'${matchHex}' AS TEXT)
      ORDER BY rank
-     LIMIT ${limit * 3};`
+     LIMIT ${(limit + offset) * 3};`
   );
 
-  if (!ftsResults.length) return [];
+  if (!ftsResults.length) return paginateRows([], 0, offset);
 
-  // Get metadata from Envelope Index for matching rowids
+  // Get metadata + total count from Envelope Index for matching rowids
   const rowids = ftsResults.map((r) => r.rowid).join(",");
-  const metaRows = await sqliteQuery(
-    MAIL_DB,
-    `SELECT m.ROWID as id, s.subject, a.address as sender,
-       datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
-       m.read, m.flagged
-     FROM messages m
-     JOIN subjects s ON m.subject = s.ROWID
-     JOIN addresses a ON m.sender = a.ROWID
-     JOIN mailboxes mb ON m.mailbox = mb.ROWID
-     WHERE m.ROWID IN (${rowids})
-       AND m.deleted = 0
-       AND ${mbFilter}
-     ORDER BY m.date_received DESC
-     LIMIT ${limit};`
-  );
+  const [metaRows, countRows] = await Promise.all([
+    sqliteQuery(
+      getMailDbPath(),
+      `SELECT m.ROWID as id, s.subject, a.address as sender,
+         datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
+         m.read, m.flagged
+       FROM messages m
+       JOIN subjects s ON m.subject = s.ROWID
+       JOIN addresses a ON m.sender = a.ROWID
+       JOIN mailboxes mb ON m.mailbox = mb.ROWID
+       WHERE m.ROWID IN (${rowids})
+         AND m.deleted = 0
+         AND ${mbFilter}
+       ORDER BY m.date_received DESC
+       LIMIT ${limit} OFFSET ${offset};`
+    ),
+    sqliteQuery(
+      getMailDbPath(),
+      `SELECT COUNT(*) as total
+       FROM messages m
+       JOIN mailboxes mb ON m.mailbox = mb.ROWID
+       WHERE m.ROWID IN (${rowids})
+         AND m.deleted = 0
+         AND ${mbFilter};`
+    ),
+  ]);
+
+  const total =
+    typeof countRows[0]?.total === "number"
+      ? countRows[0].total
+      : parseInt(String(countRows[0]?.total || "0"), 10);
 
   // Build snippet map from FTS results
   const snippetMap = new Map(
@@ -465,7 +480,7 @@ export async function searchBody(
     ])
   );
 
-  return metaRows.map((r) => {
+  const items = metaRows.map((r) => {
     const id = typeof r.id === "number" ? r.id : parseInt(String(r.id), 10);
     return {
       id,
@@ -477,6 +492,8 @@ export async function searchBody(
       snippet: snippetMap.get(id) || "",
     };
   });
+
+  return paginateRows(items, total, offset);
 }
 
 /**
@@ -492,7 +509,7 @@ export async function getIndexStats(): Promise<{
 
   const [indexedRows, totalRows, lastRows] = await Promise.all([
     sqliteQuery(FTS_DB, `SELECT COUNT(*) as cnt FROM email_content WHERE body != '';`),
-    sqliteQuery(MAIL_DB, `SELECT COUNT(*) as cnt FROM messages WHERE deleted = 0;`),
+    sqliteQuery(getMailDbPath(), `SELECT COUNT(*) as cnt FROM messages WHERE deleted = 0;`),
     sqliteQuery(FTS_DB, `SELECT COALESCE(MAX(rowid), 0) as max_id FROM email_content;`),
   ]);
 

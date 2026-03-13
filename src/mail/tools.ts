@@ -9,33 +9,14 @@
  * move_message, flag_message, mark_read
  */
 
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { executeJxa, jxaString } from "../shared/applescript.js";
+import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
 import { sqliteQuery, sqlEscape, sqlLikeEscape } from "../shared/sqlite.js";
-import { getDefaultMailAccount } from "../shared/config.js";
-
-const MAIL_DB = join(homedir(), "Library/Mail/V10/MailData/Envelope Index");
-
-/**
- * Resolve an account name (e.g. "iCloud") to a UUID for mailbox URL matching.
- * Cached after first lookup.
- */
-let _accountMap: Map<string, string> | null = null;
-async function resolveAccountUuid(accountName: string): Promise<string | null> {
-  if (!_accountMap) {
-    try {
-      const accounts = await executeJxa<{ name: string; id: string }[]>(`
-        const Mail = Application("Mail");
-        JSON.stringify(Mail.accounts().map(a => ({ name: a.name(), id: a.id() })));
-      `);
-      _accountMap = new Map(accounts.map((a) => [a.name.toLowerCase(), a.id]));
-    } catch {
-      _accountMap = new Map();
-    }
-  }
-  return _accountMap.get(accountName.toLowerCase()) || null;
-}
+import {
+  getDefaultMailAccount,
+  getMailDbPath,
+  resolveMailAccountUuid,
+} from "../shared/config.js";
+import { PaginatedResult, paginateRows } from "../shared/types.js";
 
 /** Build SQL filter for account-specific mailbox URL matching. */
 async function accountMailboxFilter(
@@ -43,16 +24,14 @@ async function accountMailboxFilter(
   account?: string
 ): Promise<string> {
   const effectiveAccount = account || getDefaultMailAccount();
-  // Mailbox URLs in the DB are URL-encoded (e.g. Sent%20Items)
   const encodedMailbox = sqlLikeEscape(encodeURIComponent(mailbox));
 
   if (effectiveAccount) {
-    const uuid = await resolveAccountUuid(effectiveAccount);
+    const uuid = await resolveMailAccountUuid(effectiveAccount, executeJxa);
     if (uuid) {
       return `mb.url LIKE '%${sqlLikeEscape(uuid)}/${encodedMailbox}' ESCAPE '\\'`;
     }
   }
-  // No account specified or not resolved — match all accounts
   return `mb.url LIKE '%/${encodedMailbox}' ESCAPE '\\'`;
 }
 
@@ -86,10 +65,12 @@ export interface EmailFull extends EmailSummary {
   cc: string[];
 }
 
+// PaginatedResult<T> imported from shared/types.ts
+export type { PaginatedResult } from "../shared/types.js";
+
 // ─── Read Tools (SQLite for listing/search, JXA for body) ───────
 
 export async function listAccounts(): Promise<Account[]> {
-  // Account names aren't in Envelope Index — use JXA
   return executeJxa<Account[]>(`
     const Mail = Application("Mail");
     const accounts = Mail.accounts();
@@ -101,7 +82,6 @@ export async function listAccounts(): Promise<Account[]> {
 }
 
 export async function listMailboxes(account?: string): Promise<Mailbox[]> {
-  // Mailbox names are associated with accounts via JXA
   const acctSetup = account
     ? `const acct = Mail.accounts.byName(${jxaString(account)});`
     : `const acct = Mail.accounts[0];`;
@@ -121,9 +101,10 @@ export async function getEmails(
   mailbox = "INBOX",
   account?: string,
   filter: "all" | "unread" | "flagged" | "today" | "this_week" = "all",
-  limit = 50
-): Promise<EmailSummary[]> {
-  // Use SQLite for fast email listing
+  limit = 50,
+  offset = 0
+): Promise<PaginatedResult<EmailSummary>> {
+  const db = getMailDbPath();
   let filterSql = "";
   if (filter === "unread") filterSql = "AND m.read = 0";
   else if (filter === "flagged") filterSql = "AND m.flagged = 1";
@@ -135,23 +116,39 @@ export async function getEmails(
 
   const mbFilter = await accountMailboxFilter(mailbox, account);
 
-  const rows = await sqliteQuery(
-    MAIL_DB,
-    `SELECT m.ROWID as id, s.subject, a.address as sender,
-       datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
-       m.read, m.flagged
-     FROM messages m
-     JOIN subjects s ON m.subject = s.ROWID
-     JOIN addresses a ON m.sender = a.ROWID
-     JOIN mailboxes mb ON m.mailbox = mb.ROWID
-     WHERE m.deleted = 0
-       AND ${mbFilter}
-       ${filterSql}
-     ORDER BY m.date_received DESC
-     LIMIT ${limit};`
-  );
+  const [rows, countRows] = await Promise.all([
+    sqliteQuery(
+      db,
+      `SELECT m.ROWID as id, s.subject, a.address as sender,
+         datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
+         m.read, m.flagged
+       FROM messages m
+       JOIN subjects s ON m.subject = s.ROWID
+       JOIN addresses a ON m.sender = a.ROWID
+       JOIN mailboxes mb ON m.mailbox = mb.ROWID
+       WHERE m.deleted = 0
+         AND ${mbFilter}
+         ${filterSql}
+       ORDER BY m.date_received DESC
+       LIMIT ${limit} OFFSET ${offset};`
+    ),
+    sqliteQuery(
+      db,
+      `SELECT COUNT(*) as total
+       FROM messages m
+       JOIN mailboxes mb ON m.mailbox = mb.ROWID
+       WHERE m.deleted = 0
+         AND ${mbFilter}
+         ${filterSql};`
+    ),
+  ]);
 
-  return rows.map((r) => ({
+  const total =
+    typeof countRows[0]?.total === "number"
+      ? countRows[0].total
+      : parseInt(String(countRows[0]?.total || "0"), 10);
+
+  const items = rows.map((r) => ({
     id: typeof r.id === "number" ? r.id : parseInt(String(r.id), 10),
     subject: String(r.subject || ""),
     sender: String(r.sender || ""),
@@ -159,6 +156,8 @@ export async function getEmails(
     read: r.read === 1,
     flagged: r.flagged === 1,
   }));
+
+  return paginateRows(items, total, offset);
 }
 
 export async function getEmail(
@@ -166,9 +165,10 @@ export async function getEmail(
   mailbox = "INBOX",
   account?: string
 ): Promise<EmailFull> {
-  // Get metadata from SQLite
+  const db = getMailDbPath();
+
   const rows = await sqliteQuery(
-    MAIL_DB,
+    db,
     `SELECT m.ROWID as id, s.subject, a.address as sender,
        datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
        datetime(m.date_sent, 'unixepoch', 'localtime') as date_sent,
@@ -183,21 +183,22 @@ export async function getEmail(
   if (!rows.length) throw new Error(`Message not found: ${messageId}`);
   const r = rows[0];
 
-  // Get recipients
-  const toRows = await sqliteQuery(
-    MAIL_DB,
-    `SELECT a.address
-     FROM recipients rc
-     JOIN addresses a ON rc.address_id = a.ROWID
-     WHERE rc.message_id = ${messageId} AND rc.type = 0;`
-  );
-  const ccRows = await sqliteQuery(
-    MAIL_DB,
-    `SELECT a.address
-     FROM recipients rc
-     JOIN addresses a ON rc.address_id = a.ROWID
-     WHERE rc.message_id = ${messageId} AND rc.type = 1;`
-  );
+  const [toRows, ccRows] = await Promise.all([
+    sqliteQuery(
+      db,
+      `SELECT a.address
+       FROM recipients rc
+       JOIN addresses a ON rc.address_id = a.ROWID
+       WHERE rc.message_id = ${messageId} AND rc.type = 0;`
+    ),
+    sqliteQuery(
+      db,
+      `SELECT a.address
+       FROM recipients rc
+       JOIN addresses a ON rc.address_id = a.ROWID
+       WHERE rc.message_id = ${messageId} AND rc.type = 1;`
+    ),
+  ]);
 
   // Body content requires JXA (not stored in Envelope Index)
   let content = "";
@@ -208,7 +209,11 @@ export async function getEmail(
       ? `const acct = Mail.accounts.byName(${jxaString(account)});`
       : `const acct = Mail.accounts[0];`;
 
-    const bodyResult = await executeJxa<{ content: string; replyTo: string; messageId: string }>(`
+    const bodyResult = await executeJxa<{
+      content: string;
+      replyTo: string;
+      messageId: string;
+    }>(`
       const Mail = Application("Mail");
       ${acctSetup}
       const mb = acct.mailboxes.byName(${jxaString(mailbox)});
@@ -226,7 +231,6 @@ export async function getEmail(
     replyTo = bodyResult.replyTo;
     msgId = bodyResult.messageId;
   } catch {
-    // Body retrieval may fail if Mail.app automation not permitted
     content = "(Body content unavailable — grant Mail automation access)";
   }
 
@@ -251,8 +255,10 @@ export async function searchMail(
   scope: "subject" | "sender" | "all" = "all",
   mailbox = "INBOX",
   account?: string,
-  limit = 20
-): Promise<EmailSummary[]> {
+  limit = 20,
+  offset = 0
+): Promise<PaginatedResult<EmailSummary>> {
+  const db = getMailDbPath();
   const safeQuery = sqlLikeEscape(query.toLowerCase());
   const mbFilter = await accountMailboxFilter(mailbox, account);
 
@@ -265,23 +271,41 @@ export async function searchMail(
     scopeSql = `AND (LOWER(s.subject) LIKE '%${safeQuery}%' ESCAPE '\\' OR LOWER(a.address) LIKE '%${safeQuery}%' ESCAPE '\\')`;
   }
 
-  const rows = await sqliteQuery(
-    MAIL_DB,
-    `SELECT m.ROWID as id, s.subject, a.address as sender,
-       datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
-       m.read, m.flagged
-     FROM messages m
-     JOIN subjects s ON m.subject = s.ROWID
-     JOIN addresses a ON m.sender = a.ROWID
-     JOIN mailboxes mb ON m.mailbox = mb.ROWID
-     WHERE m.deleted = 0
-       AND ${mbFilter}
-       ${scopeSql}
-     ORDER BY m.date_received DESC
-     LIMIT ${limit};`
-  );
+  const [rows, countRows] = await Promise.all([
+    sqliteQuery(
+      db,
+      `SELECT m.ROWID as id, s.subject, a.address as sender,
+         datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
+         m.read, m.flagged
+       FROM messages m
+       JOIN subjects s ON m.subject = s.ROWID
+       JOIN addresses a ON m.sender = a.ROWID
+       JOIN mailboxes mb ON m.mailbox = mb.ROWID
+       WHERE m.deleted = 0
+         AND ${mbFilter}
+         ${scopeSql}
+       ORDER BY m.date_received DESC
+       LIMIT ${limit} OFFSET ${offset};`
+    ),
+    sqliteQuery(
+      db,
+      `SELECT COUNT(*) as total
+       FROM messages m
+       JOIN subjects s ON m.subject = s.ROWID
+       JOIN addresses a ON m.sender = a.ROWID
+       JOIN mailboxes mb ON m.mailbox = mb.ROWID
+       WHERE m.deleted = 0
+         AND ${mbFilter}
+         ${scopeSql};`
+    ),
+  ]);
 
-  return rows.map((r) => ({
+  const total =
+    typeof countRows[0]?.total === "number"
+      ? countRows[0].total
+      : parseInt(String(countRows[0]?.total || "0"), 10);
+
+  const items = rows.map((r) => ({
     id: typeof r.id === "number" ? r.id : parseInt(String(r.id), 10),
     subject: String(r.subject || ""),
     sender: String(r.sender || ""),
@@ -289,9 +313,11 @@ export async function searchMail(
     read: r.read === 1,
     flagged: r.flagged === 1,
   }));
+
+  return paginateRows(items, total, offset);
 }
 
-// ─── Write Tools (JXA — requires Mail.app) ──────────────────────
+// ─── Write Tools (JXA — requires Mail.app, serialized via queue) ─
 
 export async function sendEmail(
   to: string[],
@@ -319,7 +345,7 @@ export async function sendEmail(
        }`
     : "";
 
-  return executeJxa(`
+  return executeJxaWrite(`
     const Mail = Application("Mail");
     ${acctSetup}
     const msg = Mail.OutgoingMessage({
@@ -357,7 +383,7 @@ export async function createDraft(
        }`
     : "";
 
-  return executeJxa(`
+  return executeJxaWrite(`
     const Mail = Application("Mail");
     ${acctSetup}
     const msg = Mail.OutgoingMessage({
@@ -388,7 +414,7 @@ export async function replyTo(
     ? `const acct = Mail.accounts.byName(${jxaString(account)});`
     : `const acct = Mail.accounts[0];`;
 
-  return executeJxa(`
+  return executeJxaWrite(`
     const Mail = Application("Mail");
     ${acctSetup}
     const mb = acct.mailboxes.byName(${jxaString(mailbox)});
@@ -420,7 +446,7 @@ export async function forwardMessage(
     ? `const acct = Mail.accounts.byName(${jxaString(account)});`
     : `const acct = Mail.accounts[0];`;
 
-  return executeJxa(`
+  return executeJxaWrite(`
     const Mail = Application("Mail");
     ${acctSetup}
     const mb = acct.mailboxes.byName(${jxaString(mailbox)});
@@ -454,7 +480,7 @@ export async function moveMessage(
     ? `const acct = Mail.accounts.byName(${jxaString(account)});`
     : `const acct = Mail.accounts[0];`;
 
-  return executeJxa(`
+  return executeJxaWrite(`
     const Mail = Application("Mail");
     ${acctSetup}
     const srcMb = acct.mailboxes.byName(${jxaString(sourceMailbox)});
@@ -482,7 +508,7 @@ export async function setMessageFlags(
   if (flagged !== undefined) flagOps.push(`m.flaggedStatus = ${flagged};`);
   if (read !== undefined) flagOps.push(`m.readStatus = ${read};`);
 
-  return executeJxa(`
+  return executeJxaWrite(`
     const Mail = Application("Mail");
     ${acctSetup}
     const mb = acct.mailboxes.byName(${jxaString(mailbox)});
