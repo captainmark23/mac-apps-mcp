@@ -888,9 +888,40 @@ server.registerResource(
 // START SERVER
 // ═══════════════════════════════════════════════════════════════════
 
+/**
+ * Auto-build the FTS index on startup.
+ * Runs in the background so it doesn't block tool calls.
+ * First run indexes up to 10,000 messages; subsequent runs catch up incrementally.
+ */
+async function autoIndexOnStartup() {
+  try {
+    const stats = await mailFts.getIndexStats();
+    const isFirstRun = stats.indexedCount === 0;
+    const batchSize = isFirstRun ? 10_000 : 5_000;
+
+    if (isFirstRun) {
+      console.error("[macos-mcp] First run — building FTS email index in background...");
+    } else if (stats.totalMessages > stats.indexedCount + stats.lastIndexedRowid * 0) {
+      // Always run incremental to catch new messages
+      console.error(`[macos-mcp] FTS index: ${stats.indexedCount}/${stats.totalMessages} messages indexed, updating...`);
+    }
+
+    const result = await mailFts.indexNewMessages(batchSize);
+    if (result.indexed > 0) {
+      console.error(`[macos-mcp] FTS index updated: ${result.indexed} new messages indexed`);
+    }
+  } catch (e) {
+    // Non-fatal — FTS is optional, other tools still work
+    console.error(`[macos-mcp] FTS auto-index skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Kick off FTS indexing in background after server is ready
+  autoIndexOnStartup();
 }
 
 main().catch((error) => {
