@@ -17,7 +17,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { sqliteQuery, sqlLikeEscape } from "../shared/sqlite.js";
+import { sqliteQuery, sqlLikeEscape, safeInt } from "../shared/sqlite.js";
 import { getMailDbPath, getMailDir, resolveMailAccountUuid, getDefaultMailAccount } from "../shared/config.js";
 import { PaginatedResult, paginateRows } from "../shared/types.js";
 
@@ -243,15 +243,20 @@ async function getLastIndexedRowid(): Promise<number> {
     FTS_DB,
     `SELECT COALESCE(MAX(rowid), 0) as max_id FROM email_content;`
   );
-  const val = rows[0]?.max_id;
-  return typeof val === "number" ? val : parseInt(String(val || "0"), 10);
+  return safeInt(rows[0]?.max_id ?? 0);
 }
+
+/** Progress callback for FTS indexing operations. */
+export type FtsProgressCallback = (progress: number, total: number, message: string) => void;
 
 /**
  * Index new messages since the last indexed ROWID.
  * Returns the number of messages indexed.
  */
-export async function indexNewMessages(limit = 5000): Promise<{
+export async function indexNewMessages(
+  limit = 5000,
+  onProgress?: FtsProgressCallback
+): Promise<{
   indexed: number;
   skipped: number;
   total: number;
@@ -265,9 +270,9 @@ export async function indexNewMessages(limit = 5000): Promise<{
     `SELECT m.ROWID, mb.url as mailbox_url
      FROM messages m
      JOIN mailboxes mb ON m.mailbox = mb.ROWID
-     WHERE m.ROWID > ${lastRowid} AND m.deleted = 0
+     WHERE m.ROWID > ${safeInt(lastRowid)} AND m.deleted = 0
      ORDER BY m.ROWID
-     LIMIT ${limit};`
+     LIMIT ${safeInt(limit)};`
   );
 
   let indexed = 0;
@@ -281,7 +286,7 @@ export async function indexNewMessages(limit = 5000): Promise<{
     const inserts: string[] = [];
 
     for (const msg of batch) {
-      const rowid = typeof msg.ROWID === "number" ? msg.ROWID : parseInt(String(msg.ROWID), 10);
+      const rowid = safeInt(msg.ROWID);
       const mailboxUrl = String(msg.mailbox_url || "");
 
       const emlxPath = resolveEmlxPath(rowid, mailboxUrl);
@@ -312,6 +317,14 @@ export async function indexNewMessages(limit = 5000): Promise<{
     if (inserts.length > 0) {
       ftsExec(inserts.join("\n"));
     }
+
+    if (onProgress) {
+      onProgress(
+        Math.min(i + BATCH_SIZE, messages.length),
+        messages.length,
+        `Indexed ${indexed} messages, ${skipped} skipped`
+      );
+    }
   }
 
   return { indexed, skipped, total: messages.length };
@@ -322,7 +335,10 @@ export async function indexNewMessages(limit = 5000): Promise<{
  * Drops existing data and re-indexes all messages.
  * This can take a while for large mailboxes.
  */
-export async function rebuildIndex(batchSize = 5000): Promise<{
+export async function rebuildIndex(
+  batchSize = 5000,
+  onProgress?: FtsProgressCallback
+): Promise<{
   indexed: number;
   skipped: number;
   total: number;
@@ -341,10 +357,7 @@ export async function rebuildIndex(batchSize = 5000): Promise<{
     getMailDbPath(),
     `SELECT COUNT(*) as cnt FROM messages WHERE deleted = 0;`
   );
-  const totalMessages =
-    typeof countRows[0]?.cnt === "number"
-      ? countRows[0].cnt
-      : parseInt(String(countRows[0]?.cnt || "0"), 10);
+  const totalMessages = safeInt(countRows[0]?.cnt ?? 0);
 
   let totalIndexed = 0;
   let totalSkipped = 0;
@@ -357,6 +370,9 @@ export async function rebuildIndex(batchSize = 5000): Promise<{
     totalSkipped += result.skipped;
     processed += result.total;
     if (result.total === 0) break; // No more messages
+    if (onProgress) {
+      onProgress(processed, totalMessages, `Indexed ${totalIndexed} messages, ${totalSkipped} skipped`);
+    }
   }
 
   return { indexed: totalIndexed, skipped: totalSkipped, total: processed };
@@ -433,13 +449,13 @@ export async function searchBody(
      FROM email_fts
      WHERE email_fts MATCH CAST(X'${matchHex}' AS TEXT)
      ORDER BY rank
-     LIMIT ${(limit + offset) * 3};`
+     LIMIT ${safeInt((safeInt(limit) + safeInt(offset)) * 3)};`
   );
 
   if (!ftsResults.length) return paginateRows([], 0, offset);
 
   // Get metadata + total count from Envelope Index for matching rowids
-  const rowids = ftsResults.map((r) => r.rowid).join(",");
+  const rowids = ftsResults.map((r) => safeInt(r.rowid)).join(",");
   const [metaRows, countRows] = await Promise.all([
     sqliteQuery(
       getMailDbPath(),
@@ -454,7 +470,7 @@ export async function searchBody(
          AND m.deleted = 0
          AND ${mbFilter}
        ORDER BY m.date_received DESC
-       LIMIT ${limit} OFFSET ${offset};`
+       LIMIT ${safeInt(limit)} OFFSET ${safeInt(offset)};`
     ),
     sqliteQuery(
       getMailDbPath(),
@@ -467,21 +483,15 @@ export async function searchBody(
     ),
   ]);
 
-  const total =
-    typeof countRows[0]?.total === "number"
-      ? countRows[0].total
-      : parseInt(String(countRows[0]?.total || "0"), 10);
+  const total = safeInt(countRows[0]?.total ?? 0);
 
   // Build snippet map from FTS results
   const snippetMap = new Map(
-    ftsResults.map((r) => [
-      typeof r.rowid === "number" ? r.rowid : parseInt(String(r.rowid), 10),
-      String(r.snippet || ""),
-    ])
+    ftsResults.map((r) => [safeInt(r.rowid), String(r.snippet || "")])
   );
 
   const items = metaRows.map((r) => {
-    const id = typeof r.id === "number" ? r.id : parseInt(String(r.id), 10);
+    const id = safeInt(r.id);
     return {
       id,
       subject: String(r.subject || ""),
@@ -519,18 +529,9 @@ export async function getIndexStats(): Promise<{
   } catch {}
 
   return {
-    indexedCount:
-      typeof indexedRows[0]?.cnt === "number"
-        ? indexedRows[0].cnt
-        : parseInt(String(indexedRows[0]?.cnt || "0"), 10),
-    totalMessages:
-      typeof totalRows[0]?.cnt === "number"
-        ? totalRows[0].cnt
-        : parseInt(String(totalRows[0]?.cnt || "0"), 10),
-    lastIndexedRowid:
-      typeof lastRows[0]?.max_id === "number"
-        ? lastRows[0].max_id
-        : parseInt(String(lastRows[0]?.max_id || "0"), 10),
+    indexedCount: safeInt(indexedRows[0]?.cnt ?? 0),
+    totalMessages: safeInt(totalRows[0]?.cnt ?? 0),
+    lastIndexedRowid: safeInt(lastRows[0]?.max_id ?? 0),
     dbSizeMb: Math.round(dbSize * 10) / 10,
   };
 }

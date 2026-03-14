@@ -84,6 +84,35 @@ export function jxaStringArray(values: string[]): string {
   return JSON.stringify(values);
 }
 
+// ─── Write Rate Limiter ──────────────────────────────────────────
+
+const WRITE_RATE_LIMIT = parseInt(process.env.MACOS_MCP_WRITE_RATE_LIMIT || "10", 10);
+const WRITE_RATE_WINDOW_MS = 60_000; // 1 minute sliding window
+const _writeTimestamps: number[] = [];
+
+/**
+ * Enforce a sliding-window rate limit on write operations.
+ * Default: 10 writes per minute (configurable via MACOS_MCP_WRITE_RATE_LIMIT).
+ * Throws immediately if the limit is exceeded.
+ */
+function checkWriteRateLimit(): void {
+  const now = Date.now();
+  // Remove timestamps outside the window
+  while (_writeTimestamps.length > 0 && _writeTimestamps[0] <= now - WRITE_RATE_WINDOW_MS) {
+    _writeTimestamps.shift();
+  }
+  if (_writeTimestamps.length >= WRITE_RATE_LIMIT) {
+    const oldestAge = now - _writeTimestamps[0];
+    const waitSec = Math.ceil((WRITE_RATE_WINDOW_MS - oldestAge) / 1000);
+    throw new Error(
+      `Write rate limit exceeded (${WRITE_RATE_LIMIT} writes per minute). ` +
+      `Try again in ${waitSec} seconds. ` +
+      `Set MACOS_MCP_WRITE_RATE_LIMIT env var to adjust.`
+    );
+  }
+  _writeTimestamps.push(now);
+}
+
 // ─── JXA Write Queue ─────────────────────────────────────────────
 
 /**
@@ -91,6 +120,8 @@ export function jxaStringArray(values: string[]): string {
  * Prevents overwhelming macOS apps (Mail, Calendar, Reminders)
  * when an agent fires multiple write calls rapidly.
  * Read operations bypass the queue since they use SQLite.
+ *
+ * Rate-limited: checks the sliding window before queueing.
  */
 let _writeQueueTail: Promise<unknown> = Promise.resolve();
 
@@ -98,6 +129,7 @@ export async function executeJxaWrite<T = unknown>(
   script: string,
   opts?: ExecOptions
 ): Promise<T> {
+  checkWriteRateLimit();
   const task = _writeQueueTail.then(
     () => executeJxa<T>(script, opts),
     () => executeJxa<T>(script, opts) // proceed even if prior write failed

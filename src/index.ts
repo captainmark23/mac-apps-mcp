@@ -7,7 +7,7 @@
  * Read operations use SQLite for instant results; writes use JXA.
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
@@ -15,6 +15,7 @@ import * as mail from "./mail/tools.js";
 import * as mailFts from "./mail/fts.js";
 import * as calendar from "./calendar/tools.js";
 import * as reminders from "./reminders/tools.js";
+import * as contacts from "./contacts/tools.js";
 
 const server = new McpServer({
   name: "macos-mcp-server",
@@ -132,6 +133,7 @@ const SuccessIdZ = { success: z.boolean(), id: z.string() };
 
 server.registerTool("mail_list_accounts", {
   description: "List all configured email accounts in Apple Mail",
+  inputSchema: {},
   outputSchema: {
     accounts: z.array(z.object({ name: z.string(), id: z.string() })),
   },
@@ -356,17 +358,28 @@ server.registerTool("mail_fts_index", {
     total: z.number(),
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ rebuild, limit }) => {
+}, async ({ rebuild, limit }, extra) => {
   try {
+    const progressToken = extra?._meta?.progressToken;
+    const onProgress = progressToken != null
+      ? (progress: number, total: number, message: string) => {
+          extra.sendNotification({
+            method: "notifications/progress",
+            params: { progressToken, progress, total, message },
+          });
+        }
+      : undefined;
+
     const result = rebuild
-      ? await mailFts.rebuildIndex(limit)
-      : await mailFts.indexNewMessages(limit);
+      ? await mailFts.rebuildIndex(limit, onProgress)
+      : await mailFts.indexNewMessages(limit, onProgress);
     return ok(result, false);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_fts_stats", {
   description: "Get statistics about the full-text search index: how many messages are indexed, total messages, index size.",
+  inputSchema: {},
   outputSchema: {
     indexedCount: z.number(),
     totalMessages: z.number(),
@@ -387,6 +400,7 @@ server.registerTool("mail_fts_stats", {
 
 server.registerTool("calendar_list", {
   description: "List all calendars (iCloud, Google, Exchange, etc.)",
+  inputSchema: {},
   outputSchema: {
     calendars: z.array(z.object({
       name: z.string(),
@@ -529,6 +543,7 @@ server.registerTool("calendar_delete_event", {
 
 server.registerTool("reminders_list_lists", {
   description: "List all reminder lists",
+  inputSchema: {},
   outputSchema: {
     lists: z.array(z.object({ name: z.string(), id: z.string(), count: z.number() })),
   },
@@ -627,6 +642,7 @@ server.registerTool("reminders_delete", {
 
 server.registerTool("daily_briefing", {
   description: "Get a complete daily briefing: today's calendar events, due/overdue reminders, and flagged/unread emails. Perfect for morning check-ins.",
+  inputSchema: {},
   outputSchema: {
     date: z.string(),
     calendar: z.object({
@@ -644,19 +660,36 @@ server.registerTool("daily_briefing", {
       unreadCount: z.number(),
       unread: z.array(EmailSummaryZ),
     }),
+    errors: z.array(z.string()).optional(),
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }, async () => {
   try {
+    const empty = { total: 0, count: 0, offset: 0, items: [] as unknown[], has_more: false };
+    type WithError = typeof empty & { error?: string };
+
     const [eventsResult, dueResult, overdueResult, incompleteResult, flaggedResult, unreadResult] =
       await Promise.all([
-        calendar.getEventsToday().catch(() => ({ total: 0, count: 0, offset: 0, items: [], has_more: false })),
-        reminders.getReminders(undefined, "due_today").catch(() => ({ total: 0, count: 0, offset: 0, items: [], has_more: false })),
-        reminders.getReminders(undefined, "overdue").catch(() => ({ total: 0, count: 0, offset: 0, items: [], has_more: false })),
-        reminders.getReminders(undefined, "incomplete").catch(() => ({ total: 0, count: 0, offset: 0, items: [], has_more: false })),
-        mail.getEmails("INBOX", undefined, "flagged", 20).catch(() => ({ total: 0, count: 0, offset: 0, items: [], has_more: false })),
-        mail.getEmails("INBOX", undefined, "unread", 20).catch(() => ({ total: 0, count: 0, offset: 0, items: [], has_more: false })),
+        calendar.getEventsToday().catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
+        reminders.getReminders(undefined, "due_today").catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
+        reminders.getReminders(undefined, "overdue").catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
+        reminders.getReminders(undefined, "incomplete").catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
+        mail.getEmails("INBOX", undefined, "flagged", 20).catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
+        mail.getEmails("INBOX", undefined, "unread", 20).catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
       ]);
+
+    // Collect any errors from sub-queries
+    const errors: string[] = [];
+    for (const [label, result] of [
+      ["calendar", eventsResult],
+      ["reminders_due", dueResult],
+      ["reminders_overdue", overdueResult],
+      ["reminders_incomplete", incompleteResult],
+      ["mail_flagged", flaggedResult],
+      ["mail_unread", unreadResult],
+    ] as [string, WithError][]) {
+      if (result.error) errors.push(`${label}: ${result.error}`);
+    }
 
     const briefing = {
       date: new Date().toLocaleDateString("en-GB", {
@@ -680,11 +713,162 @@ server.registerTool("daily_briefing", {
         unreadCount: unreadResult.total,
         unread: unreadResult.items,
       },
+      ...(errors.length > 0 ? { errors } : {}),
     };
 
     return ok(briefing);
   } catch (e) { return err(e); }
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// CONTACTS TOOLS
+// ═══════════════════════════════════════════════════════════════════
+
+const ContactSummaryZ = z.object({
+  id: z.string(),
+  firstName: z.string(),
+  lastName: z.string(),
+  organization: z.string(),
+  jobTitle: z.string(),
+  email: z.string(),
+  phone: z.string(),
+});
+
+const ContactFullZ = ContactSummaryZ.extend({
+  middleName: z.string(),
+  nickname: z.string(),
+  department: z.string(),
+  title: z.string(),
+  suffix: z.string(),
+  birthday: z.string(),
+  emails: z.array(z.object({ address: z.string(), label: z.string() })),
+  phones: z.array(z.object({ number: z.string(), label: z.string() })),
+  addresses: z.array(z.object({
+    street: z.string(),
+    city: z.string(),
+    state: z.string(),
+    zip: z.string(),
+    country: z.string(),
+    label: z.string(),
+  })),
+  note: z.string(),
+});
+
+server.registerTool("contacts_list", {
+  description: "List or search contacts from the macOS Address Book. Returns pagination metadata.",
+  inputSchema: {
+    query: z.string().optional().describe("Search term to filter contacts by name or organization"),
+    limit: z.number().min(1).max(500).default(50).describe("Max contacts to return"),
+    offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
+  },
+  outputSchema: paginatedOutput(ContactSummaryZ),
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, async ({ query, limit, offset }) => {
+  try {
+    const result = await contacts.listContacts(query, limit, offset);
+    return ok(result);
+  } catch (e) { return err(e); }
+});
+
+server.registerTool("contacts_get", {
+  description: "Get full details for a specific contact including all emails, phones, addresses, and notes",
+  inputSchema: {
+    contactId: z.string().describe("Contact unique ID (from contacts_list or contacts_search)"),
+  },
+  outputSchema: ContactFullZ.shape,
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, async ({ contactId }) => {
+  try {
+    const contact = await contacts.getContact(contactId);
+    return ok(contact);
+  } catch (e) { return err(e); }
+});
+
+server.registerTool("contacts_search", {
+  description: "Search contacts by name, email, phone number, or organization",
+  inputSchema: {
+    query: z.string().describe("Search term"),
+    scope: z.enum(["all", "name", "email", "phone", "organization"]).default("all").describe("Where to search: all, name, email, phone, organization"),
+    limit: z.number().min(1).max(500).default(20).describe("Max results to return"),
+    offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
+  },
+  outputSchema: paginatedOutput(ContactSummaryZ),
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, async ({ query, scope, limit, offset }) => {
+  try {
+    const result = await contacts.searchContacts(query, scope, limit, offset);
+    return ok(result);
+  } catch (e) { return err(e); }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// RESOURCES
+// ═══════════════════════════════════════════════════════════════════
+
+server.registerResource(
+  "mail_accounts",
+  "macos://mail/accounts",
+  { description: "List of configured email accounts in Apple Mail" },
+  async () => ({
+    contents: [{
+      uri: "macos://mail/accounts",
+      mimeType: "application/json",
+      text: JSON.stringify(await mail.listAccounts(), null, 2),
+    }],
+  })
+);
+
+server.registerResource(
+  "mail_mailboxes",
+  new ResourceTemplate("macos://mail/{account}/mailboxes", { list: undefined }),
+  { description: "List mailboxes for a specific email account" },
+  async (uri, { account }) => ({
+    contents: [{
+      uri: uri.href,
+      mimeType: "application/json",
+      text: JSON.stringify(await mail.listMailboxes(account as string), null, 2),
+    }],
+  })
+);
+
+server.registerResource(
+  "calendars",
+  "macos://calendars",
+  { description: "List of all calendars (iCloud, Google, Exchange, etc.)" },
+  async () => ({
+    contents: [{
+      uri: "macos://calendars",
+      mimeType: "application/json",
+      text: JSON.stringify(await calendar.listCalendars(), null, 2),
+    }],
+  })
+);
+
+server.registerResource(
+  "reminder_lists",
+  "macos://reminders/lists",
+  { description: "List of all reminder lists" },
+  async () => ({
+    contents: [{
+      uri: "macos://reminders/lists",
+      mimeType: "application/json",
+      text: JSON.stringify(await reminders.listReminderLists(), null, 2),
+    }],
+  })
+);
+
+server.registerResource(
+  "contacts_list",
+  "macos://contacts",
+  { description: "Browsable contacts from macOS Address Book" },
+  async () => ({
+    contents: [{
+      uri: "macos://contacts",
+      mimeType: "application/json",
+      text: JSON.stringify(await contacts.listContacts(undefined, 100, 0), null, 2),
+    }],
+  })
+);
 
 // ═══════════════════════════════════════════════════════════════════
 // START SERVER

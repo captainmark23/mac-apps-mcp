@@ -10,7 +10,7 @@
  */
 
 import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
-import { sqliteQuery, sqlEscape, sqlLikeEscape } from "../shared/sqlite.js";
+import { sqliteQuery, sqlEscape, sqlLikeEscape, safeInt } from "../shared/sqlite.js";
 import {
   getDefaultMailAccount,
   getMailDbPath,
@@ -130,7 +130,7 @@ export async function getEmails(
          AND ${mbFilter}
          ${filterSql}
        ORDER BY m.date_received DESC
-       LIMIT ${limit} OFFSET ${offset};`
+       LIMIT ${safeInt(limit)} OFFSET ${safeInt(offset)};`
     ),
     sqliteQuery(
       db,
@@ -143,13 +143,10 @@ export async function getEmails(
     ),
   ]);
 
-  const total =
-    typeof countRows[0]?.total === "number"
-      ? countRows[0].total
-      : parseInt(String(countRows[0]?.total || "0"), 10);
+  const total = safeInt(countRows[0]?.total ?? 0);
 
   const items = rows.map((r) => ({
-    id: typeof r.id === "number" ? r.id : parseInt(String(r.id), 10),
+    id: safeInt(r.id),
     subject: String(r.subject || ""),
     sender: String(r.sender || ""),
     dateReceived: String(r.date_received || ""),
@@ -176,11 +173,11 @@ export async function getEmail(
      FROM messages m
      JOIN subjects s ON m.subject = s.ROWID
      JOIN addresses a ON m.sender = a.ROWID
-     WHERE m.ROWID = ${messageId}
+     WHERE m.ROWID = ${safeInt(messageId)}
      LIMIT 1;`
   );
 
-  if (!rows.length) throw new Error(`Message not found: ${messageId}`);
+  if (!rows.length) throw new Error(`Message not found: ${safeInt(messageId)}`);
   const r = rows[0];
 
   const [toRows, ccRows] = await Promise.all([
@@ -189,14 +186,14 @@ export async function getEmail(
       `SELECT a.address
        FROM recipients rc
        JOIN addresses a ON rc.address_id = a.ROWID
-       WHERE rc.message_id = ${messageId} AND rc.type = 0;`
+       WHERE rc.message_id = ${safeInt(messageId)} AND rc.type = 0;`
     ),
     sqliteQuery(
       db,
       `SELECT a.address
        FROM recipients rc
        JOIN addresses a ON rc.address_id = a.ROWID
-       WHERE rc.message_id = ${messageId} AND rc.type = 1;`
+       WHERE rc.message_id = ${safeInt(messageId)} AND rc.type = 1;`
     ),
   ]);
 
@@ -218,7 +215,7 @@ export async function getEmail(
       ${acctSetup}
       const mb = acct.mailboxes.byName(${jxaString(mailbox)});
       const ids = mb.messages.id();
-      const idx = ids.indexOf(${messageId});
+      const idx = ids.indexOf(${safeInt(messageId)});
       if (idx === -1) throw new Error("Message not found via JXA");
       const m = mb.messages[idx];
       JSON.stringify({
@@ -235,7 +232,7 @@ export async function getEmail(
   }
 
   return {
-    id: typeof r.id === "number" ? r.id : parseInt(String(r.id), 10),
+    id: safeInt(r.id),
     subject: String(r.subject || ""),
     sender: String(r.sender || ""),
     dateReceived: String(r.date_received || ""),
@@ -285,7 +282,7 @@ export async function searchMail(
          AND ${mbFilter}
          ${scopeSql}
        ORDER BY m.date_received DESC
-       LIMIT ${limit} OFFSET ${offset};`
+       LIMIT ${safeInt(limit)} OFFSET ${safeInt(offset)};`
     ),
     sqliteQuery(
       db,
@@ -300,13 +297,10 @@ export async function searchMail(
     ),
   ]);
 
-  const total =
-    typeof countRows[0]?.total === "number"
-      ? countRows[0].total
-      : parseInt(String(countRows[0]?.total || "0"), 10);
+  const total = safeInt(countRows[0]?.total ?? 0);
 
   const items = rows.map((r) => ({
-    id: typeof r.id === "number" ? r.id : parseInt(String(r.id), 10),
+    id: safeInt(r.id),
     subject: String(r.subject || ""),
     sender: String(r.sender || ""),
     dateReceived: String(r.date_received || ""),

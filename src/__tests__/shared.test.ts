@@ -5,7 +5,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { sqlEscape, sqlLikeEscape } from "../shared/sqlite.js";
+import { sqlEscape, sqlLikeEscape, safeInt } from "../shared/sqlite.js";
 import { paginateArray, paginateRows } from "../shared/types.js";
 
 // ─── sqlEscape ──────────────────────────────────────────────────
@@ -59,6 +59,54 @@ describe("sqlLikeEscape", () => {
 
   it("handles empty string", () => {
     assert.equal(sqlLikeEscape(""), "");
+  });
+});
+
+// ─── safeInt ─────────────────────────────────────────────────────
+
+describe("safeInt", () => {
+  it("returns integer unchanged", () => {
+    assert.equal(safeInt(42), 42);
+  });
+
+  it("truncates floating point numbers", () => {
+    assert.equal(safeInt(42.9), 42);
+  });
+
+  it("parses numeric strings", () => {
+    assert.equal(safeInt("123"), 123);
+  });
+
+  it("parses leading-numeric strings (parseInt behavior)", () => {
+    assert.equal(safeInt("123abc"), 123);
+  });
+
+  it("handles negative numbers", () => {
+    assert.equal(safeInt(-7), -7);
+  });
+
+  it("handles zero", () => {
+    assert.equal(safeInt(0), 0);
+  });
+
+  it("throws on NaN", () => {
+    assert.throws(() => safeInt(NaN), /Invalid integer value/);
+  });
+
+  it("throws on Infinity", () => {
+    assert.throws(() => safeInt(Infinity), /Invalid integer value/);
+  });
+
+  it("throws on non-numeric string", () => {
+    assert.throws(() => safeInt("abc"), /Invalid integer value/);
+  });
+
+  it("throws on undefined", () => {
+    assert.throws(() => safeInt(undefined), /Invalid integer value/);
+  });
+
+  it("throws on null", () => {
+    assert.throws(() => safeInt(null), /Invalid integer value/);
   });
 });
 

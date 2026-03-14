@@ -12,7 +12,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
-import { sqliteQuery, sqlEscape } from "../shared/sqlite.js";
+import { sqliteQuery, sqlEscape, safeInt } from "../shared/sqlite.js";
 import { getCalendarNames } from "../shared/config.js";
 import { PaginatedResult, paginateArray } from "../shared/types.js";
 
@@ -175,8 +175,8 @@ export async function getEvents(
   const rows = await sqliteQuery(
     CALENDAR_DB,
     `${EVENT_SELECT}
-     WHERE oc.day >= ${startTs} - 86400
-       AND oc.day < ${endTs}
+     WHERE oc.day >= ${safeInt(startTs)} - 86400
+       AND oc.day < ${safeInt(endTs)}
        ${calFilter}
      ORDER BY computed_start;`
   );
@@ -250,7 +250,7 @@ export async function getEvent(
        COALESCE(i.display_name, i.first_name || ' ' || i.last_name, '') as name
      FROM Participant p
      LEFT JOIN Identity i ON p.identity_id = i.ROWID
-     WHERE p.owner_id = ${r.item_rowid};`
+     WHERE p.owner_id = ${safeInt(r.item_rowid)};`
   );
 
   // Fetch recurrence info if applicable
@@ -258,7 +258,7 @@ export async function getEvent(
   if (r.has_recurrences === 1 || r.has_recurrences === "1") {
     const recRows = await sqliteQuery(
       CALENDAR_DB,
-      `SELECT * FROM Recurrence WHERE owner_id = ${r.item_rowid} LIMIT 1;`
+      `SELECT * FROM Recurrence WHERE owner_id = ${safeInt(r.item_rowid)} LIMIT 1;`
     );
     if (recRows.length) {
       recurrence = "recurring";

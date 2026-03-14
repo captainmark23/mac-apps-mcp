@@ -69,3 +69,15 @@ export function sqlEscape(value: string): string {
 export function sqlLikeEscape(value: string): string {
   return value.replace(/'/g, "''").replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
+
+/**
+ * Coerce a value to a safe integer for SQL interpolation.
+ * Defense-in-depth: even though Zod validates at the MCP boundary,
+ * this guards internal functions against misuse or future refactors.
+ * Throws on NaN, Infinity, or non-numeric strings.
+ */
+export function safeInt(value: unknown): number {
+  const n = typeof value === "number" ? Math.trunc(value) : parseInt(String(value), 10);
+  if (!Number.isFinite(n)) throw new Error(`Invalid integer value: ${String(value)}`);
+  return n;
+}

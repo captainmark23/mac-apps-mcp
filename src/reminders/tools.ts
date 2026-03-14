@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readdirSync, statSync } from "node:fs";
 import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
-import { sqliteQuery, sqlEscape } from "../shared/sqlite.js";
+import { sqliteQuery, sqlEscape, safeInt } from "../shared/sqlite.js";
 import { getReminderLists } from "../shared/config.js";
 import { PaginatedResult, paginateRows } from "../shared/types.js";
 
@@ -37,7 +37,12 @@ function findRemindersDb(): string {
   if (files.length === 0) {
     throw new Error(`No .sqlite files found in: ${storesDir}`);
   }
-  // Return the largest file (the one with actual data)
+  // macOS stores multiple .sqlite files in this directory, but typically
+  // only one has actual reminder data. We pick the largest file because
+  // empty/placeholder databases are small (~32KB), while the active
+  // database with real data is significantly larger.
+  // Note: This heuristic could theoretically pick the wrong file if a user
+  // has multiple accounts with similar-sized databases.
   let best = files[0];
   let bestSize = 0;
   for (const f of files) {
@@ -156,12 +161,12 @@ export async function getReminders(
       break;
     case "due_today":
       filterSql = `AND r.ZCOMPLETED = 0 AND r.ZDUEDATE IS NOT NULL
-        AND r.ZDUEDATE >= ${startOfDayTs}
-        AND r.ZDUEDATE < ${endOfDayTs}`;
+        AND r.ZDUEDATE >= ${safeInt(startOfDayTs)}
+        AND r.ZDUEDATE < ${safeInt(endOfDayTs)}`;
       break;
     case "overdue":
       filterSql = `AND r.ZCOMPLETED = 0 AND r.ZDUEDATE IS NOT NULL
-        AND r.ZDUEDATE < ${nowTs}`;
+        AND r.ZDUEDATE < ${safeInt(nowTs)}`;
       break;
     case "flagged":
       filterSql = "AND r.ZCOMPLETED = 0 AND r.ZFLAGGED = 1";
@@ -183,7 +188,7 @@ export async function getReminders(
        ORDER BY
          CASE WHEN r.ZDUEDATE IS NOT NULL THEN 0 ELSE 1 END,
          r.ZDUEDATE
-       LIMIT ${limit} OFFSET ${offset};`
+       LIMIT ${safeInt(limit)} OFFSET ${safeInt(offset)};`
     ),
     sqliteQuery(
       db,
@@ -194,10 +199,7 @@ export async function getReminders(
     ),
   ]);
 
-  const total =
-    typeof countRows[0]?.total === "number"
-      ? countRows[0].total
-      : parseInt(String(countRows[0]?.total || "0"), 10);
+  const total = safeInt(countRows[0]?.total ?? 0);
 
   const items = rows.map((r) => ({
     id: REMINDER_ID_PREFIX + String(r.ZCKIDENTIFIER || ""),

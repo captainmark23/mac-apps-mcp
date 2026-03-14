@@ -1,6 +1,6 @@
 # macos-mcp
 
-MCP server for macOS that gives Claude access to Apple Mail, Calendar, and Reminders. All reads hit SQLite databases directly for instant results — no slow AppleScript round-trips.
+MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders, and Contacts. All reads hit SQLite databases directly for instant results — no slow AppleScript round-trips.
 
 ## Features
 
@@ -8,7 +8,9 @@ MCP server for macOS that gives Claude access to Apple Mail, Calendar, and Remin
 - **Full-text email search** — FTS5 index of email body content with snippets
 - **Apple Calendar** — list, query, create, modify, delete events
 - **Apple Reminders** — list, query, create, complete, delete reminders
+- **Apple Contacts** — list, search, and get full contact details from the Address Book
 - **Daily briefing** — one-call summary of today's events, due reminders, and unread mail
+- **MCP resources** — browsable resources for accounts, calendars, lists, and contacts
 - **Zero native dependencies** — uses macOS system `sqlite3` binary and JXA
 
 ## Requirements
@@ -56,8 +58,9 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `MACOS_MCP_CALENDARS` | Comma-separated calendar names to include | All calendars |
 | `MACOS_MCP_MAIL_ACCOUNT` | Default mail account name | First account |
 | `MACOS_MCP_REMINDER_LISTS` | Comma-separated reminder list names to include | All lists |
+| `MACOS_MCP_WRITE_RATE_LIMIT` | Max write operations per minute | 10 |
 
-## Tools (30)
+## Tools (33)
 
 ### Mail (12)
 
@@ -80,7 +83,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 
 | Tool | Description |
 |---|---|
-| `mail_fts_index` | Build or update the full-text search index |
+| `mail_fts_index` | Build or update the full-text search index (supports progress notifications) |
 | `mail_fts_stats` | Get index statistics |
 
 ### Calendar (8)
@@ -107,11 +110,31 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `reminders_complete` | Mark a reminder as completed |
 | `reminders_delete` | Delete a reminder |
 
+### Contacts (3)
+
+| Tool | Description |
+|---|---|
+| `contacts_list` | List or search contacts by name/organization |
+| `contacts_get` | Get full contact details (emails, phones, addresses, notes) |
+| `contacts_search` | Search contacts by name, email, phone, or organization |
+
 ### Briefing (1)
 
 | Tool | Description |
 |---|---|
 | `daily_briefing` | Today's events, due/overdue reminders, flagged and unread emails |
+
+## Resources
+
+The server exposes browsable MCP resources:
+
+| URI | Description |
+|---|---|
+| `macos://mail/accounts` | Email accounts |
+| `macos://mail/{account}/mailboxes` | Mailboxes for an account |
+| `macos://calendars` | All calendars |
+| `macos://reminders/lists` | Reminder lists |
+| `macos://contacts` | Contacts |
 
 ## Full-Text Email Search
 
@@ -128,13 +151,13 @@ Use mail_fts_index
 Use mail_search_body with query="invoice payment"
 ```
 
-The index is stored at `~/.macos-mcp/mail-fts.db`.
+The index is stored at `~/.macos-mcp/mail-fts.db`. Clients that support progress notifications will receive real-time updates during indexing.
 
 ## Architecture
 
 ```
 src/
-  index.ts              # MCP server — tool registration and routing
+  index.ts              # MCP server — tool/resource registration and routing
   mail/
     tools.ts            # Mail reads (SQLite) and writes (JXA)
     fts.ts              # FTS5 full-text body search index
@@ -142,15 +165,20 @@ src/
     tools.ts            # Calendar reads (SQLite) and writes (JXA)
   reminders/
     tools.ts            # Reminders reads (SQLite) and writes (JXA)
+  contacts/
+    tools.ts            # Contacts reads (SQLite)
   shared/
     sqlite.ts           # Zero-dep SQLite query helper (/usr/bin/sqlite3)
-    applescript.ts       # JXA execution helper (osascript)
+    applescript.ts       # JXA execution helper with rate-limited write queue
     config.ts           # Environment variable configuration
+    types.ts            # Shared types and pagination helpers
+  __tests__/
+    shared.test.ts      # Unit tests for shared utilities
 ```
 
 **Read operations** query macOS SQLite databases directly via the system `sqlite3` binary with `-json -readonly` flags. This is orders of magnitude faster than AppleScript/JXA — calendar queries that took 1:46 via JXA complete in 14ms via SQLite.
 
-**Write operations** use JXA (JavaScript for Automation) via `osascript`, which properly interfaces with the app APIs and respects macOS sandboxing.
+**Write operations** use JXA (JavaScript for Automation) via `osascript`, which properly interfaces with the app APIs and respects macOS sandboxing. Writes are serialized via a queue and rate-limited (default: 10/minute).
 
 ## Troubleshooting
 
@@ -170,9 +198,17 @@ Write operations (sending mail, creating events/reminders) use JXA which require
 
 If `reminders_*` tools return "database directory not found", the Reminders container may not exist yet. Open Reminders.app once and create at least one reminder to initialize the database.
 
+### Contacts database not found
+
+If `contacts_*` tools return "Contacts database not found", open Contacts.app once to initialize the database. The server reads from `~/Library/Application Support/AddressBook/Sources/`.
+
 ### SQLite query timed out
 
 Queries have a 10-second timeout by default. If you hit this on large mailboxes, try narrowing your search with filters (e.g., `filter: "today"`) or reducing the `limit` parameter.
+
+### Write rate limit exceeded
+
+Write operations are rate-limited to 10 per minute by default to prevent runaway agents. Adjust with the `MACOS_MCP_WRITE_RATE_LIMIT` environment variable.
 
 ### Node.js version
 
