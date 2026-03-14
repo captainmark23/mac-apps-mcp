@@ -107,6 +107,36 @@ let _mailAccountExpiry = 0;
  * Uses a shared TTL cache so multiple modules don't each maintain their own.
  * Requires the caller to pass in executeJxa to avoid circular imports.
  */
+/**
+ * Get a cached Map of account ID → account name.
+ * Used by mail tools to resolve account names from mailbox URLs.
+ */
+let _mailAccountMap: Map<string, string> | null = null;
+let _mailAccountMapExpiry = 0;
+
+export async function getMailAccountMap(
+  executeJxa: <T>(script: string) => Promise<T>
+): Promise<Map<string, string>> {
+  if (_mailAccountMap && Date.now() < _mailAccountMapExpiry) {
+    return _mailAccountMap;
+  }
+  try {
+    const accounts = await executeJxa<{ name: string; id: string }[]>(`
+      const Mail = Application("Mail");
+      JSON.stringify(Mail.accounts().map(a => ({ name: a.name(), id: a.id() })));
+    `);
+    const map = new Map<string, string>();
+    for (const a of accounts) {
+      map.set(a.id, a.name);
+    }
+    _mailAccountMap = map;
+    _mailAccountMapExpiry = Date.now() + DEFAULT_CACHE_TTL_MS;
+    return map;
+  } catch {
+    return _mailAccountMap ?? new Map();
+  }
+}
+
 export async function resolveMailAccountUuid(
   accountName: string,
   executeJxa: <T>(script: string) => Promise<T>

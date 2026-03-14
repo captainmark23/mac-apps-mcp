@@ -37,7 +37,7 @@ const SQLITE3 = "/usr/bin/sqlite3";
  *   1243    → Data/1/Messages/1243.emlx
  *   548864  → Data/8/4/5/Messages/548864.emlx
  */
-function emlxSubpath(rowid: number): string {
+export function emlxSubpath(rowid: number): string {
   const bucket = Math.floor(rowid / 1000);
   if (bucket === 0) return `Messages/${rowid}.emlx`;
   const digits = String(bucket).split("").reverse().join("/");
@@ -50,7 +50,7 @@ function emlxSubpath(rowid: number): string {
  * Handles URL-encoded names (Sent%20Items → Sent Items.mbox) and
  * nested paths ([Gmail]/All Mail → [Gmail].mbox/All Mail.mbox).
  */
-function mailboxUrlToDir(url: string): string | null {
+export function mailboxUrlToDir(url: string): string | null {
   // imap://UUID/MailboxName or ews://UUID/MailboxName or pop://...
   const match = url.match(/^(?:imap|ews|local|pop):\/\/([^/]+)\/(.+)$/);
   if (!match) return null;
@@ -67,7 +67,7 @@ function mailboxUrlToDir(url: string): string | null {
  * Find the Data UUID directory inside a .mbox directory.
  * Each .mbox contains one UUID subdirectory with the actual data.
  */
-function findDataDir(mboxDir: string): string | null {
+export function findDataDir(mboxDir: string): string | null {
   if (!existsSync(mboxDir)) return null;
   const entries = readdirSync(mboxDir);
   // Look for UUID-like directory (contains hyphens, 36 chars)
@@ -81,7 +81,7 @@ function findDataDir(mboxDir: string): string | null {
 /**
  * Resolve the full path to an .emlx file.
  */
-function resolveEmlxPath(rowid: number, mailboxUrl: string): string | null {
+export function resolveEmlxPath(rowid: number, mailboxUrl: string): string | null {
   const mboxDir = mailboxUrlToDir(mailboxUrl);
   if (!mboxDir) return null;
   const dataDir = findDataDir(mboxDir);
@@ -96,7 +96,7 @@ function resolveEmlxPath(rowid: number, mailboxUrl: string): string | null {
  * Extract plain text body from an .emlx file.
  * Format: first line is byte count, then RFC 822 email, then Apple plist metadata.
  */
-function parseEmlxBody(filePath: string): string {
+export function parseEmlxBody(filePath: string): string {
   const buf = readFileSync(filePath);
 
   // First line is the byte count of the email portion
@@ -131,7 +131,7 @@ function parseEmlxBody(filePath: string): string {
 /**
  * Decode quoted-printable encoding, handling multi-byte UTF-8 sequences.
  */
-function decodeQuotedPrintable(text: string): string {
+export function decodeQuotedPrintable(text: string): string {
   // Remove soft line breaks first
   const cleaned = text.replace(/=\r?\n/g, "");
   // Collect encoded byte sequences and decode as UTF-8
@@ -148,7 +148,7 @@ function decodeQuotedPrintable(text: string): string {
 /**
  * Strip HTML tags and decode entities. Simple but effective for search indexing.
  */
-function stripHtml(html: string): string {
+export function stripHtml(html: string): string {
   return html
     // Remove style and script blocks entirely
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")

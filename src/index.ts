@@ -45,6 +45,8 @@ const EmailSummaryZ = z.object({
   dateReceived: z.string(),
   read: z.boolean(),
   flagged: z.boolean(),
+  mailbox: z.string(),
+  account: z.string(),
 });
 
 const EmailFullZ = z.object({
@@ -60,6 +62,8 @@ const EmailFullZ = z.object({
   messageId: z.string(),
   to: z.array(z.string()),
   cc: z.array(z.string()),
+  mailbox: z.string(),
+  account: z.string(),
 });
 
 const EventSummaryZ = z.object({
@@ -162,10 +166,10 @@ server.registerTool("mail_list_mailboxes", {
 });
 
 server.registerTool("mail_get_emails", {
-  description: "Get emails from a mailbox with optional filtering. Returns newest first with pagination metadata.",
+  description: "Get emails with optional filtering. Shows which account and mailbox each email belongs to. Omit mailbox to search across all mailboxes and accounts. Returns newest first with pagination metadata.",
   inputSchema: {
-    mailbox: z.string().default("INBOX").describe("Mailbox name"),
-    account: z.string().optional().describe("Account name"),
+    mailbox: z.string().optional().describe("Mailbox name (e.g. 'INBOX'). Omit to search all mailboxes across all accounts."),
+    account: z.string().optional().describe("Account name (e.g. 'iCloud'). Omit to search all accounts."),
     filter: z.enum(["all", "unread", "flagged", "today", "this_week"]).default("all").describe("Filter: all, unread, flagged, today, this_week"),
     limit: z.number().min(1).max(500).default(50).describe("Max emails to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
@@ -180,28 +184,26 @@ server.registerTool("mail_get_emails", {
 });
 
 server.registerTool("mail_get_email", {
-  description: "Get a single email with full content including body text",
+  description: "Get a single email with full content including body text. Reads the email body directly from disk — no need to specify mailbox or account. Returns the account and mailbox the email belongs to.",
   inputSchema: {
     messageId: z.number().describe("Email ID (from mail_get_emails or mail_search)"),
-    mailbox: z.string().default("INBOX"),
-    account: z.string().optional(),
   },
   outputSchema: EmailFullZ.shape,
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ messageId, mailbox, account }) => {
+}, async ({ messageId }) => {
   try {
-    const email = await mail.getEmail(messageId, mailbox, account);
+    const email = await mail.getEmail(messageId);
     return ok(email);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_search", {
-  description: "Search emails by subject and/or sender in a mailbox. Returns pagination metadata.",
+  description: "Search emails by subject and/or sender. Shows which account and mailbox each result belongs to. Omit mailbox to search across all mailboxes and accounts. Returns pagination metadata.",
   inputSchema: {
     query: z.string().describe("Search term"),
     scope: z.enum(["all", "subject", "sender"]).default("all").describe("Where to search"),
-    mailbox: z.string().default("INBOX"),
-    account: z.string().optional(),
+    mailbox: z.string().optional().describe("Mailbox name. Omit to search all mailboxes across all accounts."),
+    account: z.string().optional().describe("Account name. Omit to search all accounts."),
     limit: z.number().min(1).max(500).default(20).describe("Max results to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
   },
