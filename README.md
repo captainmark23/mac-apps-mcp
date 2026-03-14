@@ -21,7 +21,16 @@ MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders
 
 ### Granting Full Disk Access
 
-System Settings → Privacy & Security → Full Disk Access → add your terminal app and/or Claude Desktop.
+System Settings → Privacy & Security → Full Disk Access:
+
+1. Add **Claude Desktop** (for Claude Desktop usage)
+2. Add **Terminal** or your terminal app (for Claude Code usage)
+3. **Important:** Also add the **Node.js binary** itself — Claude Desktop spawns `node` as a child process, and it's the `node` process that reads the macOS databases. To add it:
+   - Click **+** in Full Disk Access
+   - Press **Cmd+Shift+G** and go to the output of `which node` (e.g., `/opt/homebrew/Cellar/node/25.3.0/bin/`)
+   - Select **node** and toggle it on
+
+> **Note:** If you update Node.js (e.g., via Homebrew), the binary path changes and you'll need to re-add it to Full Disk Access.
 
 ## Installation
 
