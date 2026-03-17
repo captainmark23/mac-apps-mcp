@@ -24,6 +24,9 @@ const server = new McpServer({
 
 import { sanitizeErrorMessage } from "./shared/types.js";
 
+/** Maximum characters for a JSON-stringified response before truncation kicks in. */
+const CHARACTER_LIMIT = 25000;
+
 /** Wrap handler with standard error handling. Sanitizes paths from messages. */
 function err(error: unknown): { isError: true; content: [{ type: "text"; text: string }] } {
   const raw = error instanceof Error ? error.message : String(error);
@@ -31,11 +34,88 @@ function err(error: unknown): { isError: true; content: [{ type: "text"; text: s
   return { isError: true, content: [{ type: "text", text: `Error: ${msg}` }] };
 }
 
+/** Convert structured data to human-readable markdown. */
+function toMarkdown(data: unknown, indent = 0): string {
+  const prefix = "  ".repeat(indent);
+  if (data === null || data === undefined) return `${prefix}_none_`;
+  if (typeof data === "string") return `${prefix}${data}`;
+  if (typeof data === "number" || typeof data === "boolean") return `${prefix}${String(data)}`;
+  if (Array.isArray(data)) {
+    if (data.length === 0) return `${prefix}_empty list_`;
+    return data.map((item, i) => {
+      if (typeof item === "object" && item !== null && !Array.isArray(item)) {
+        const lines = toMarkdown(item, indent + 1);
+        return `${prefix}- **Item ${i + 1}**\n${lines}`;
+      }
+      return `${prefix}- ${typeof item === "object" ? JSON.stringify(item) : String(item)}`;
+    }).join("\n");
+  }
+  if (typeof data === "object") {
+    const obj = data as Record<string, unknown>;
+    const keys = Object.keys(obj);
+    if (keys.length === 0) return `${prefix}_empty_`;
+    return keys.map((key) => {
+      const val = obj[key];
+      if (typeof val === "object" && val !== null) {
+        return `${prefix}**${key}:**\n${toMarkdown(val, indent + 1)}`;
+      }
+      return `${prefix}**${key}:** ${val === null || val === undefined ? "_none_" : String(val)}`;
+    }).join("\n");
+  }
+  return `${prefix}${String(data)}`;
+}
+
 /** Format a successful tool response with structured content. */
-function ok(data: object, pretty = true) {
+function ok(data: object, pretty = true, format?: string) {
+  // Markdown format: return plain text without structuredContent
+  if (format === "markdown") {
+    return {
+      content: [{ type: "text" as const, text: toMarkdown(data) }],
+    };
+  }
+
+  // JSON format (default): check for truncation
+  const result = data as Record<string, unknown>;
+  let json = JSON.stringify(result, null, pretty ? 2 : undefined);
+
+  if (json.length > CHARACTER_LIMIT && Array.isArray(result.items)) {
+    const totalItems = result.items.length;
+    let items = [...result.items];
+
+    // Binary search for the right number of items that fits
+    while (items.length > 0) {
+      const candidate = {
+        ...result,
+        items,
+        truncation_message: `Response truncated. Use pagination (offset/limit) or filters to narrow results. Showing ${items.length} of ${totalItems} items.`,
+      };
+      const candidateJson = JSON.stringify(candidate, null, pretty ? 2 : undefined);
+      if (candidateJson.length <= CHARACTER_LIMIT) {
+        return {
+          content: [{ type: "text" as const, text: candidateJson }],
+          structuredContent: candidate,
+        };
+      }
+      // Remove ~20% of remaining items each iteration
+      items = items.slice(0, Math.max(Math.floor(items.length * 0.8), items.length - 1));
+    }
+
+    // Fallback: no items fit
+    const fallback = {
+      ...result,
+      items: [],
+      truncation_message: `Response truncated. Use pagination (offset/limit) or filters to narrow results. Showing 0 of ${totalItems} items.`,
+    };
+    const fallbackJson = JSON.stringify(fallback, null, pretty ? 2 : undefined);
+    return {
+      content: [{ type: "text" as const, text: fallbackJson }],
+      structuredContent: fallback,
+    };
+  }
+
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data, null, pretty ? 2 : undefined) }],
-    structuredContent: data as Record<string, unknown>,
+    content: [{ type: "text" as const, text: json }],
+    structuredContent: result,
   };
 }
 
@@ -141,101 +221,107 @@ const SuccessIdZ = { success: z.boolean(), id: z.string() };
 
 server.registerTool("mail_list_accounts", {
   title: "List Mail Accounts",
-  description: "List all configured email accounts in Apple Mail",
-  inputSchema: {},
+  description: "List all configured email accounts in Apple Mail. Use when: discovering available email accounts, checking account configuration",
+  inputSchema: z.object({
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: {
     accounts: z.array(z.object({ name: z.string(), id: z.string() })),
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async () => {
+}, async ({ response_format }) => {
   try {
     const accounts = await mail.listAccounts();
-    return ok({ accounts });
+    return ok({ accounts }, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_list_mailboxes", {
   title: "List Mailboxes",
-  description: "List all mailboxes for an email account",
-  inputSchema: {
-    account: z.string().max(200).optional().describe("Account name (default: first account)"),
-  },
+  description: "List all mailboxes for an email account. Use when: browsing mailbox structure, checking unread counts per folder",
+  inputSchema: z.object({
+    account: z.string().max(200, "Name too long").optional().describe("Account name (default: first account)"),
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: {
     mailboxes: z.array(z.object({ name: z.string(), unreadCount: z.number() })),
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ account }) => {
+}, async ({ account, response_format }) => {
   try {
     const mailboxes = await mail.listMailboxes(account);
-    return ok({ mailboxes });
+    return ok({ mailboxes }, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_get_emails", {
   title: "Get Emails",
-  description: "Get emails with optional filtering. Each result includes the account, mailbox, and a body preview (~200 chars). Omit mailbox to search across all mailboxes and accounts. TRIAGE GUIDELINES: (1) Group results by account when presenting to the user. (2) Use the preview field to understand what each email is about — never guess from the subject line alone. (3) For any email you want to describe in detail, call mail_get_email first to read the full body. Returns newest first with pagination metadata.",
-  inputSchema: {
-    mailbox: z.string().max(200).optional().describe("Mailbox name (e.g. 'INBOX'). Omit to search all mailboxes across all accounts."),
-    account: z.string().max(200).optional().describe("Account name (e.g. 'iCloud'). Omit to search all accounts."),
+  description: "Get emails with optional filtering. Each result includes the account, mailbox, and a body preview (~200 chars). Omit mailbox to search across all mailboxes and accounts. TRIAGE GUIDELINES: (1) Group results by account when presenting to the user. (2) Use the preview field to understand what each email is about — never guess from the subject line alone. (3) For any email you want to describe in detail, call mail_get_email first to read the full body. Returns newest first with pagination metadata. Use when: triaging inbox, reviewing recent messages",
+  inputSchema: z.object({
+    mailbox: z.string().max(200, "Name too long").optional().describe("Mailbox name (e.g. 'INBOX'). Omit to search all mailboxes across all accounts."),
+    account: z.string().max(200, "Name too long").optional().describe("Account name (e.g. 'iCloud'). Omit to search all accounts."),
     filter: z.enum(["all", "unread", "flagged", "today", "this_week"]).default("all").describe("Filter: all, unread, flagged, today, this_week"),
     limit: z.number().min(1).max(500).default(50).describe("Max emails to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: paginatedOutput(EmailSummaryZ),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ mailbox, account, filter, limit, offset }) => {
+}, async ({ mailbox, account, filter, limit, offset, response_format }) => {
   try {
     const result = await mail.getEmails(mailbox, account, filter, limit, offset);
-    return ok(result);
+    return ok(result, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_get_email", {
   title: "Get Email Details",
-  description: "Get a single email with full content including body text. Reads the email body directly from disk — no need to specify mailbox or account. Returns the account and mailbox the email belongs to.",
-  inputSchema: {
+  description: "Get a single email with full content including body text. Reads the email body directly from disk — no need to specify mailbox or account. Returns the account and mailbox the email belongs to. Use when: reading full email content, preparing to reply or forward",
+  inputSchema: z.object({
     messageId: z.number().describe("Email ID (from mail_get_emails or mail_search)"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: EmailFullZ.shape,
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ messageId }) => {
+}, async ({ messageId, response_format }) => {
   try {
     const email = await mail.getEmail(messageId);
-    return ok(email);
+    return ok(email, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_search", {
   title: "Search Emails",
-  description: "Search emails by subject and/or sender. Each result includes the account, mailbox, and a body preview (~200 chars). Omit mailbox to search across all mailboxes and accounts. Use the preview field to understand results — never guess content from the subject line alone. Returns pagination metadata.",
-  inputSchema: {
-    query: z.string().max(1000).describe("Search term"),
+  description: "Search emails by subject and/or sender. Each result includes the account, mailbox, and a body preview (~200 chars). Omit mailbox to search across all mailboxes and accounts. Use the preview field to understand results — never guess content from the subject line alone. Returns pagination metadata. Use when: finding emails by subject, sender, or keyword",
+  inputSchema: z.object({
+    query: z.string().min(1, "Query must not be empty").max(1000, "Query too long").describe("Search term"),
     scope: z.enum(["all", "subject", "sender"]).default("all").describe("Where to search"),
-    mailbox: z.string().max(200).optional().describe("Mailbox name. Omit to search all mailboxes across all accounts."),
-    account: z.string().max(200).optional().describe("Account name. Omit to search all accounts."),
+    mailbox: z.string().max(200, "Name too long").optional().describe("Mailbox name. Omit to search all mailboxes across all accounts."),
+    account: z.string().max(200, "Name too long").optional().describe("Account name. Omit to search all accounts."),
     limit: z.number().min(1).max(500).default(20).describe("Max results to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: paginatedOutput(EmailSummaryZ),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ query, scope, mailbox, account, limit, offset }) => {
+}, async ({ query, scope, mailbox, account, limit, offset, response_format }) => {
   try {
     const results = await mail.searchMail(query, scope, mailbox, account, limit, offset);
-    return ok(results);
+    return ok(results, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_send", {
   title: "Send Email",
-  description: "Send an email. For important emails, prefer mail_create_draft so the user can review first.",
-  inputSchema: {
-    to: z.array(z.string().email()).describe("Recipient email addresses"),
-    subject: z.string().max(1000).describe("Email subject"),
+  description: "Send an email. For important emails, prefer mail_create_draft so the user can review first. Use when: sending a quick reply, automated email dispatch",
+  inputSchema: z.object({
+    to: z.array(z.string().email("Invalid email address")).min(1, "At least one recipient required").describe("Recipient email addresses"),
+    subject: z.string().max(1000, "Query too long").describe("Email subject"),
     body: z.string().max(100000).describe("Email body text"),
-    cc: z.array(z.string().email()).optional().describe("CC addresses"),
-    bcc: z.array(z.string().email()).optional().describe("BCC addresses"),
-    account: z.string().max(200).optional(),
-  },
+    cc: z.array(z.string().email("Invalid email address")).optional().describe("CC addresses"),
+    bcc: z.array(z.string().email("Invalid email address")).optional().describe("BCC addresses"),
+    account: z.string().max(200, "Name too long").optional(),
+  }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 }, async ({ to, subject, body, cc, bcc, account }) => {
@@ -247,14 +333,14 @@ server.registerTool("mail_send", {
 
 server.registerTool("mail_create_draft", {
   title: "Create Email Draft",
-  description: "Create a draft email for user review in Mail.app. Preferred for important emails.",
-  inputSchema: {
-    to: z.array(z.string().email()).describe("Recipient email addresses"),
-    subject: z.string().max(1000),
+  description: "Create a draft email for user review in Mail.app. Preferred for important emails. Use when: composing an important email that needs review, preparing a message for later",
+  inputSchema: z.object({
+    to: z.array(z.string().email("Invalid email address")).min(1, "At least one recipient required").describe("Recipient email addresses"),
+    subject: z.string().max(1000, "Query too long"),
     body: z.string().max(100000),
-    cc: z.array(z.string().email()).optional(),
-    account: z.string().max(200).optional(),
-  },
+    cc: z.array(z.string().email("Invalid email address")).optional(),
+    account: z.string().max(200, "Name too long").optional(),
+  }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 }, async ({ to, subject, body, cc, account }) => {
@@ -266,15 +352,15 @@ server.registerTool("mail_create_draft", {
 
 server.registerTool("mail_reply", {
   title: "Reply to Email",
-  description: "Reply to an email. Set send=false to save as draft for review.",
-  inputSchema: {
+  description: "Reply to an email. Set send=false to save as draft for review. Use when: responding to a conversation, following up on a thread",
+  inputSchema: z.object({
     messageId: z.number().describe("Email ID to reply to"),
     body: z.string().max(100000).describe("Reply body"),
     replyAll: z.boolean().default(false),
     send: z.boolean().default(true).describe("Send immediately or save as draft"),
-    mailbox: z.string().max(200).default("INBOX"),
-    account: z.string().max(200).optional(),
-  },
+    mailbox: z.string().max(200, "Name too long").default("INBOX"),
+    account: z.string().max(200, "Name too long").optional(),
+  }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 }, async ({ messageId, body, replyAll, send, mailbox, account }) => {
@@ -286,15 +372,15 @@ server.registerTool("mail_reply", {
 
 server.registerTool("mail_forward", {
   title: "Forward Email",
-  description: "Forward an email. Set send=false to save as draft for review.",
-  inputSchema: {
+  description: "Forward an email. Set send=false to save as draft for review. Use when: sharing an email with someone else, delegating a message",
+  inputSchema: z.object({
     messageId: z.number().describe("Email ID to forward"),
-    to: z.array(z.string().email()).describe("Forward to these addresses"),
+    to: z.array(z.string().email("Invalid email address")).min(1, "At least one recipient required").describe("Forward to these addresses"),
     body: z.string().max(100000).optional().describe("Message to prepend"),
     send: z.boolean().default(true),
-    mailbox: z.string().max(200).default("INBOX"),
-    account: z.string().max(200).optional(),
-  },
+    mailbox: z.string().max(200, "Name too long").default("INBOX"),
+    account: z.string().max(200, "Name too long").optional(),
+  }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 }, async ({ messageId, to, body, send, mailbox, account }) => {
@@ -306,13 +392,13 @@ server.registerTool("mail_forward", {
 
 server.registerTool("mail_move", {
   title: "Move Email",
-  description: "Move an email to a different mailbox",
-  inputSchema: {
+  description: "Move an email to a different mailbox. Use when: organizing emails into folders, archiving messages",
+  inputSchema: z.object({
     messageId: z.number(),
-    targetMailbox: z.string().max(200).describe("Destination mailbox name"),
-    sourceMailbox: z.string().max(200).default("INBOX"),
-    account: z.string().max(200).optional(),
-  },
+    targetMailbox: z.string().max(200, "Name too long").describe("Destination mailbox name"),
+    sourceMailbox: z.string().max(200, "Name too long").default("INBOX"),
+    account: z.string().max(200, "Name too long").optional(),
+  }).strict(),
   outputSchema: SuccessZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }, async ({ messageId, targetMailbox, sourceMailbox, account }) => {
@@ -324,14 +410,14 @@ server.registerTool("mail_move", {
 
 server.registerTool("mail_set_flags", {
   title: "Set Email Flags",
-  description: "Set flagged and/or read status on an email",
-  inputSchema: {
+  description: "Set flagged and/or read status on an email. Use when: marking emails as read/unread, flagging important messages",
+  inputSchema: z.object({
     messageId: z.number(),
     flagged: z.boolean().optional().describe("Set flagged status"),
     read: z.boolean().optional().describe("Set read status"),
-    mailbox: z.string().max(200).default("INBOX"),
-    account: z.string().max(200).optional(),
-  },
+    mailbox: z.string().max(200, "Name too long").default("INBOX"),
+    account: z.string().max(200, "Name too long").optional(),
+  }).strict(),
   outputSchema: SuccessZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }, async ({ messageId, flagged, read, mailbox, account }) => {
@@ -347,30 +433,31 @@ server.registerTool("mail_set_flags", {
 
 server.registerTool("mail_search_body", {
   title: "Search Email Bodies",
-  description: "Search email body content using full-text search. Searches inside the actual email text, not just subject/sender. Requires the FTS index to be built first (use mail_fts_index). Returns pagination metadata.",
-  inputSchema: {
-    query: z.string().max(1000).describe("Search term(s) to find in email bodies"),
-    mailbox: z.string().max(200).default("INBOX"),
-    account: z.string().max(200).optional(),
+  description: "Search email body content using full-text search. Searches inside the actual email text, not just subject/sender. Requires the FTS index to be built first (use mail_fts_index). Returns pagination metadata. Use when: searching for specific content within emails, finding messages mentioning a topic",
+  inputSchema: z.object({
+    query: z.string().min(1, "Query must not be empty").max(1000, "Query too long").describe("Search term(s) to find in email bodies"),
+    mailbox: z.string().max(200, "Name too long").default("INBOX"),
+    account: z.string().max(200, "Name too long").optional(),
     limit: z.number().min(1).max(500).default(20).describe("Max results to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: paginatedOutput(FtsResultZ),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ query, mailbox, account, limit, offset }) => {
+}, async ({ query, mailbox, account, limit, offset, response_format }) => {
   try {
     const results = await mailFts.searchBody(query, mailbox, account, limit, offset);
-    return ok(results);
+    return ok(results, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_fts_index", {
   title: "Build FTS Index",
-  description: "Build or update the full-text search index for email bodies. Run with rebuild=true for a full re-index, or rebuild=false (default) for incremental updates.",
-  inputSchema: {
+  description: "Build or update the full-text search index for email bodies. Run with rebuild=true for a full re-index, or rebuild=false (default) for incremental updates. Use when: preparing for body search, updating search index after new emails",
+  inputSchema: z.object({
     rebuild: z.boolean().default(false).describe("Full rebuild (true) or incremental update (false)"),
     limit: z.number().min(1).max(50000).default(5000).describe("Max messages to process per batch"),
-  },
+  }).strict(),
   outputSchema: {
     indexed: z.number(),
     skipped: z.number(),
@@ -398,8 +485,10 @@ server.registerTool("mail_fts_index", {
 
 server.registerTool("mail_fts_stats", {
   title: "FTS Index Statistics",
-  description: "Get statistics about the full-text search index: how many messages are indexed, total messages, index size.",
-  inputSchema: {},
+  description: "Get statistics about the full-text search index: how many messages are indexed, total messages, index size. Use when: checking if FTS index is up to date, diagnosing search issues",
+  inputSchema: z.object({
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: {
     indexedCount: z.number(),
     totalMessages: z.number(),
@@ -407,10 +496,10 @@ server.registerTool("mail_fts_stats", {
     dbSizeMb: z.number(),
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async () => {
+}, async ({ response_format }) => {
   try {
     const stats = await mailFts.getIndexStats();
-    return ok(stats);
+    return ok(stats, true, response_format);
   } catch (e) { return err(e); }
 });
 
@@ -420,8 +509,10 @@ server.registerTool("mail_fts_stats", {
 
 server.registerTool("calendar_list", {
   title: "List Calendars",
-  description: "List all calendars (iCloud, Google, Exchange, etc.)",
-  inputSchema: {},
+  description: "List all calendars (iCloud, Google, Exchange, etc.). Use when: discovering available calendars, checking which calendars are configured",
+  inputSchema: z.object({
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: {
     calendars: z.array(z.object({
       name: z.string(),
@@ -431,94 +522,98 @@ server.registerTool("calendar_list", {
     })),
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async () => {
+}, async ({ response_format }) => {
   try {
     const calendars = await calendar.listCalendars();
-    return ok({ calendars });
+    return ok({ calendars }, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("calendar_today", {
   title: "Today's Events",
-  description: "Get all events for today. Returns pagination metadata.",
-  inputSchema: {
-    calendar: z.string().max(200).optional().describe("Calendar name (default: all calendars)"),
+  description: "Get all events for today. Returns pagination metadata. Use when: checking today's schedule, daily planning",
+  inputSchema: z.object({
+    calendar: z.string().max(200, "Name too long").optional().describe("Calendar name (default: all calendars)"),
     limit: z.number().min(1).max(500).default(200).describe("Max events to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: paginatedOutput(EventSummaryZ),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ calendar: cal, limit, offset }) => {
+}, async ({ calendar: cal, limit, offset, response_format }) => {
   try {
     const events = await calendar.getEventsToday(cal, limit, offset);
-    return ok(events);
+    return ok(events, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("calendar_this_week", {
   title: "This Week's Events",
-  description: "Get all events for the next 7 days. Returns pagination metadata.",
-  inputSchema: {
-    calendar: z.string().max(200).optional(),
+  description: "Get all events for the next 7 days. Returns pagination metadata. Use when: weekly planning, checking upcoming schedule",
+  inputSchema: z.object({
+    calendar: z.string().max(200, "Name too long").optional(),
     limit: z.number().min(1).max(500).default(200).describe("Max events to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: paginatedOutput(EventSummaryZ),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ calendar: cal, limit, offset }) => {
+}, async ({ calendar: cal, limit, offset, response_format }) => {
   try {
     const events = await calendar.getEventsThisWeek(cal, limit, offset);
-    return ok(events);
+    return ok(events, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("calendar_get_events", {
   title: "Get Events by Date Range",
-  description: "Get events in a date range. Dates should be ISO 8601 format (e.g. 2026-03-08). Returns pagination metadata.",
-  inputSchema: {
+  description: "Get events in a date range. Dates should be ISO 8601 format (e.g. 2026-03-08). Returns pagination metadata. Use when: looking up events in a date range, checking availability for a period",
+  inputSchema: z.object({
     startDate: z.string().describe("Start date (ISO 8601, e.g. 2026-03-08)"),
     endDate: z.string().describe("End date (ISO 8601)"),
-    calendar: z.string().max(200).optional(),
+    calendar: z.string().max(200, "Name too long").optional(),
     limit: z.number().min(1).max(500).default(200).describe("Max events to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: paginatedOutput(EventSummaryZ),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ startDate, endDate, calendar: cal, limit, offset }) => {
+}, async ({ startDate, endDate, calendar: cal, limit, offset, response_format }) => {
   try {
     const events = await calendar.getEvents(startDate, endDate, cal, limit, offset);
-    return ok(events);
+    return ok(events, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("calendar_get_event", {
   title: "Get Event Details",
-  description: "Get full details for a specific event including attendees",
-  inputSchema: {
+  description: "Get full details for a specific event including attendees. Use when: viewing event details, checking attendee list or event description",
+  inputSchema: z.object({
     eventId: z.string().describe("Event ID (from calendar_today etc.)"),
-    calendar: z.string().max(200).describe("Calendar name the event belongs to"),
-  },
+    calendar: z.string().max(200, "Name too long").describe("Calendar name the event belongs to"),
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: EventFullZ.shape,
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ eventId, calendar: cal }) => {
+}, async ({ eventId, calendar: cal, response_format }) => {
   try {
     const event = await calendar.getEvent(eventId, cal);
-    return ok(event);
+    return ok(event, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("calendar_create_event", {
   title: "Create Calendar Event",
-  description: "Create a new calendar event",
-  inputSchema: {
-    summary: z.string().max(1000).describe("Event title"),
+  description: "Create a new calendar event. Use when: scheduling a meeting, adding an event to the calendar",
+  inputSchema: z.object({
+    summary: z.string().max(1000, "Query too long").describe("Event title"),
     startDate: z.string().describe("Start date/time (ISO 8601)"),
     endDate: z.string().describe("End date/time (ISO 8601)"),
-    calendar: z.string().max(200).optional().describe("Calendar name (default: first calendar)"),
+    calendar: z.string().max(200, "Name too long").optional().describe("Calendar name (default: first calendar)"),
     location: z.string().max(1000).optional(),
     description: z.string().max(1000).optional(),
     allDay: z.boolean().default(false),
-  },
+  }).strict(),
   outputSchema: SuccessIdZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 }, async ({ summary, startDate, endDate, calendar: cal, location, description, allDay }) => {
@@ -530,16 +625,16 @@ server.registerTool("calendar_create_event", {
 
 server.registerTool("calendar_modify_event", {
   title: "Modify Calendar Event",
-  description: "Modify an existing calendar event. You can update the title (summary), start/end dates, location, and/or description. Only include the fields you want to change.",
-  inputSchema: {
+  description: "Modify an existing calendar event. You can update the title (summary), start/end dates, location, and/or description. Only include the fields you want to change. Use when: rescheduling a meeting, updating event details",
+  inputSchema: z.object({
     eventId: z.string(),
-    calendar: z.string().max(200),
-    summary: z.string().max(1000).optional(),
+    calendar: z.string().max(200, "Name too long"),
+    summary: z.string().max(1000, "Query too long").optional(),
     startDate: z.string().optional(),
     endDate: z.string().optional(),
     location: z.string().max(1000).optional(),
     description: z.string().max(1000).optional(),
-  },
+  }).strict(),
   outputSchema: SuccessZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 }, async ({ eventId, calendar: cal, ...updates }) => {
@@ -551,11 +646,11 @@ server.registerTool("calendar_modify_event", {
 
 server.registerTool("calendar_delete_event", {
   title: "Delete Calendar Event",
-  description: "Delete a calendar event",
-  inputSchema: {
+  description: "Delete a calendar event. Use when: cancelling a meeting, removing an event from the calendar",
+  inputSchema: z.object({
     eventId: z.string(),
-    calendar: z.string().max(200),
-  },
+    calendar: z.string().max(200, "Name too long"),
+  }).strict(),
   outputSchema: SuccessZ,
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
 }, async ({ eventId, calendar: cal }) => {
@@ -571,64 +666,68 @@ server.registerTool("calendar_delete_event", {
 
 server.registerTool("reminders_list_lists", {
   title: "List Reminder Lists",
-  description: "List all reminder lists",
-  inputSchema: {},
+  description: "List all reminder lists. Use when: discovering available reminder lists, checking list names before creating reminders",
+  inputSchema: z.object({
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: {
     lists: z.array(z.object({ name: z.string(), id: z.string(), count: z.number() })),
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async () => {
+}, async ({ response_format }) => {
   try {
     const lists = await reminders.listReminderLists();
-    return ok({ lists });
+    return ok({ lists }, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("reminders_get", {
   title: "Get Reminders",
-  description: "Get reminders with filtering. Default: incomplete only. Returns pagination metadata.",
-  inputSchema: {
-    list: z.string().max(200).optional().describe("Reminder list name (default: all lists)"),
+  description: "Get reminders with filtering. Default: incomplete only. Returns pagination metadata. Use when: checking tasks for a specific list, reviewing to-dos",
+  inputSchema: z.object({
+    list: z.string().max(200, "Name too long").optional().describe("Reminder list name (default: all lists)"),
     filter: z.enum(["all", "incomplete", "completed", "due_today", "overdue", "flagged"]).default("incomplete").describe("Filter: incomplete (default), due_today, overdue, flagged, completed, all"),
     limit: z.number().min(1).max(500).default(50).describe("Max reminders to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: paginatedOutput(ReminderSummaryZ),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ list, filter, limit, offset }) => {
+}, async ({ list, filter, limit, offset, response_format }) => {
   try {
     const items = await reminders.getReminders(list, filter, limit, offset);
-    return ok(items);
+    return ok(items, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("reminders_get_detail", {
   title: "Get Reminder Details",
-  description: "Get full details for a specific reminder",
-  inputSchema: {
+  description: "Get full details for a specific reminder. Use when: viewing reminder notes, checking reminder metadata",
+  inputSchema: z.object({
     reminderId: z.string(),
-    list: z.string().max(200).describe("Reminder list name"),
-  },
+    list: z.string().max(200, "Name too long").describe("Reminder list name"),
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: ReminderFullZ.shape,
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ reminderId, list }) => {
+}, async ({ reminderId, list, response_format }) => {
   try {
     const item = await reminders.getReminder(reminderId, list);
-    return ok(item);
+    return ok(item, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("reminders_create", {
   title: "Create Reminder",
-  description: "Create a new reminder",
-  inputSchema: {
-    name: z.string().max(1000).describe("Reminder title"),
-    list: z.string().max(200).optional().describe("List name (default: default list)"),
+  description: "Create a new reminder. Use when: adding a task or to-do item, setting a due-date reminder",
+  inputSchema: z.object({
+    name: z.string().max(1000, "Query too long").describe("Reminder title"),
+    list: z.string().max(200, "Name too long").optional().describe("List name (default: default list)"),
     dueDate: z.string().optional().describe("Due date (ISO 8601)"),
     body: z.string().max(10000).optional().describe("Notes/description"),
     priority: z.number().min(0).max(9).optional().describe("Priority: 0=none, 1=high, 5=medium, 9=low"),
     flagged: z.boolean().optional(),
-  },
+  }).strict(),
   outputSchema: SuccessIdZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 }, async ({ name, list, dueDate, body, priority, flagged }) => {
@@ -640,11 +739,11 @@ server.registerTool("reminders_create", {
 
 server.registerTool("reminders_complete", {
   title: "Complete Reminder",
-  description: "Mark a reminder as completed",
-  inputSchema: {
+  description: "Mark a reminder as completed. Use when: finishing a task, checking off a to-do",
+  inputSchema: z.object({
     reminderId: z.string(),
-    list: z.string().max(200),
-  },
+    list: z.string().max(200, "Name too long"),
+  }).strict(),
   outputSchema: SuccessZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 }, async ({ reminderId, list }) => {
@@ -656,11 +755,11 @@ server.registerTool("reminders_complete", {
 
 server.registerTool("reminders_delete", {
   title: "Delete Reminder",
-  description: "Delete a reminder",
-  inputSchema: {
+  description: "Delete a reminder. Use when: removing a task that is no longer needed",
+  inputSchema: z.object({
     reminderId: z.string(),
-    list: z.string().max(200),
-  },
+    list: z.string().max(200, "Name too long"),
+  }).strict(),
   outputSchema: SuccessZ,
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
 }, async ({ reminderId, list }) => {
@@ -676,8 +775,10 @@ server.registerTool("reminders_delete", {
 
 server.registerTool("daily_briefing", {
   title: "Daily Briefing",
-  description: "Get a complete daily briefing: today's calendar events, due/overdue reminders, and flagged/unread emails. Each email includes a body preview. When presenting the briefing: (1) Group emails by account. (2) Use the preview field to accurately describe each email — never guess from the subject line. (3) Call mail_get_email for any email you want to summarize in detail.",
-  inputSchema: {},
+  description: "Get a complete daily briefing: today's calendar events, due/overdue reminders, and flagged/unread emails. Each email includes a body preview. When presenting the briefing: (1) Group emails by account. (2) Use the preview field to accurately describe each email — never guess from the subject line. (3) Call mail_get_email for any email you want to summarize in detail. Use when: morning review, getting a quick overview of the day",
+  inputSchema: z.object({
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: {
     date: z.string(),
     calendar: z.object({
@@ -698,7 +799,7 @@ server.registerTool("daily_briefing", {
     errors: z.array(z.string()).optional(),
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async () => {
+}, async ({ response_format }) => {
   try {
     const empty = { total: 0, count: 0, offset: 0, items: [] as unknown[], has_more: false };
     type WithError = typeof empty & { error?: string };
@@ -751,7 +852,7 @@ server.registerTool("daily_briefing", {
       ...(errors.length > 0 ? { errors } : {}),
     };
 
-    return ok(briefing);
+    return ok(briefing, true, response_format);
   } catch (e) { return err(e); }
 });
 
@@ -791,51 +892,54 @@ const ContactFullZ = ContactSummaryZ.extend({
 
 server.registerTool("contacts_list", {
   title: "List Contacts",
-  description: "List or search contacts from the macOS Address Book. Returns pagination metadata.",
-  inputSchema: {
-    query: z.string().max(1000).optional().describe("Search term to filter contacts by name or organization"),
+  description: "Browse contacts alphabetically with pagination. Use when: browsing the address book, listing contacts without a specific search term",
+  inputSchema: z.object({
+    query: z.string().max(1000, "Query too long").optional().describe("Search term to filter contacts by name or organization"),
     limit: z.number().min(1).max(500).default(50).describe("Max contacts to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: paginatedOutput(ContactSummaryZ),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ query, limit, offset }) => {
+}, async ({ query, limit, offset, response_format }) => {
   try {
     const result = await contacts.listContacts(query, limit, offset);
-    return ok(result);
+    return ok(result, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("contacts_get", {
   title: "Get Contact Details",
-  description: "Get full details for a specific contact including all emails, phones, addresses, and notes",
-  inputSchema: {
+  description: "Get full details for a specific contact including all emails, phones, addresses, and notes. Use when: viewing complete contact information, getting phone numbers or addresses",
+  inputSchema: z.object({
     contactId: z.string().describe("Contact unique ID (from contacts_list or contacts_search)"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: ContactFullZ.shape,
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ contactId }) => {
+}, async ({ contactId, response_format }) => {
   try {
     const contact = await contacts.getContact(contactId);
-    return ok(contact);
+    return ok(contact, true, response_format);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("contacts_search", {
   title: "Search Contacts",
-  description: "Search contacts by name, email, phone number, or organization",
-  inputSchema: {
-    query: z.string().max(1000).describe("Search term"),
+  description: "Search contacts by name, email, phone number, or organization. Use when: finding a specific person's contact details by name or email",
+  inputSchema: z.object({
+    query: z.string().min(1, "Query must not be empty").max(1000, "Query too long").describe("Search term"),
     scope: z.enum(["all", "name", "email", "phone", "organization"]).default("all").describe("Where to search: all, name, email, phone, organization"),
     limit: z.number().min(1).max(500).default(20).describe("Max results to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
-  },
+    response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
+  }).strict(),
   outputSchema: paginatedOutput(ContactSummaryZ),
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ query, scope, limit, offset }) => {
+}, async ({ query, scope, limit, offset, response_format }) => {
   try {
     const result = await contacts.searchContacts(query, scope, limit, offset);
-    return ok(result);
+    return ok(result, true, response_format);
   } catch (e) { return err(e); }
 });
 
