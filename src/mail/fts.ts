@@ -194,8 +194,11 @@ function cleanBodyForIndex(raw: string): string {
 
 /** Run a SQL command against the FTS database via stdin (avoids E2BIG for large SQL). */
 function ftsExec(sql: string): void {
+  // Enable WAL mode and busy timeout to prevent "database is locked" errors
+  // during background indexing of large mailboxes.
+  const preamble = "PRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=5000;\n";
   execFileSync(SQLITE3, [FTS_DB], {
-    input: sql,
+    input: preamble + sql,
     timeout: 120_000,
     maxBuffer: 10 * 1024 * 1024,
   });
@@ -207,8 +210,10 @@ function ensureFtsDb(): void {
     mkdirSync(FTS_DIR, { recursive: true });
   }
 
-  if (!existsSync(FTS_DB)) {
+  // Check size > 0 to handle corrupted/empty DB files from prior failed attempts
+  if (!existsSync(FTS_DB) || statSync(FTS_DB).size === 0) {
     ftsExec(`
+      PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS email_content (
         rowid INTEGER PRIMARY KEY,
         body TEXT NOT NULL,
