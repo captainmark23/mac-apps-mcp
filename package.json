@@ -1,6 +1,6 @@
 {
   "name": "macos-mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for macOS — Apple Mail, Calendar, and Reminders via Claude",
   "type": "module",
   "main": "build/index.js",
@@ -17,7 +17,8 @@
     "start": "node build/index.js",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test build/__tests__/shared.test.js"
+    "test": "tsc && node --test build/__tests__/shared.test.js",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "mcp",
