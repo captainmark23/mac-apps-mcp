@@ -438,8 +438,8 @@ export async function getEmail(
        datetime(m.date_sent, 'unixepoch', 'localtime') as date_sent,
        m.read, m.flagged, mb.url as mailbox_url
      FROM messages m
-     JOIN subjects s ON m.subject = s.ROWID
-     JOIN addresses a ON m.sender = a.ROWID
+     LEFT JOIN subjects s ON m.subject = s.ROWID
+     LEFT JOIN addresses a ON m.sender = a.ROWID
      JOIN mailboxes mb ON m.mailbox = mb.ROWID
      WHERE m.ROWID = ${safeInt(messageId)}
      LIMIT 1;`
