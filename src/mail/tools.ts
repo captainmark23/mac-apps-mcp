@@ -121,6 +121,158 @@ function getBodyPreview(messageId: number, mailboxUrl: string): string {
   }
 }
 
+/**
+ * Resolve the mailbox name and account name for a message from SQLite.
+ * Used by write operations so callers don't need to guess the right mailbox/account.
+ */
+async function resolveMessageLocation(
+  messageId: number
+): Promise<{ mailboxName: string; accountName: string }> {
+  const db = getMailDbPath();
+  const rows = await sqliteQuery(
+    db,
+    `SELECT mb.url as mailbox_url
+     FROM messages m
+     JOIN mailboxes mb ON m.mailbox = mb.ROWID
+     WHERE m.ROWID = ${safeInt(messageId)}
+     LIMIT 1;`
+  );
+  if (!rows.length) throw new Error(`Message not found: ${safeInt(messageId)}`);
+
+  const mailboxUrl = String(rows[0].mailbox_url || "");
+  const parsed = parseMailboxUrl(mailboxUrl);
+  if (!parsed) throw new Error(`Cannot resolve mailbox for message ${safeInt(messageId)}`);
+
+  const accountMap = await getMailAccountMap(executeJxa);
+  const accountName = accountMap.get(parsed.accountId);
+  if (!accountName) throw new Error(`Cannot resolve account for message ${safeInt(messageId)}`);
+
+  return { mailboxName: parsed.mailboxName, accountName };
+}
+
+// ─── Attachment Metadata ─────────────────────────────────────────
+
+/** Cache whether the attachments table exists in the Envelope Index. */
+let _attachmentsTableExists: boolean | null = null;
+
+/**
+ * Query attachment metadata from the Envelope Index (if the table exists)
+ * or fall back to parsing MIME headers from the .emlx file.
+ */
+async function queryAttachmentMetadata(
+  messageId: number,
+  mailboxUrl: string
+): Promise<{ filename: string; mimeType: string; size: number }[]> {
+  const db = getMailDbPath();
+
+  // Check if attachments table exists (cached after first check)
+  if (_attachmentsTableExists === null) {
+    try {
+      const tables = await sqliteQuery(
+        db,
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='attachments';`
+      );
+      _attachmentsTableExists = tables.length > 0;
+    } catch {
+      _attachmentsTableExists = false;
+    }
+  }
+
+  if (_attachmentsTableExists) {
+    try {
+      const rows = await sqliteQuery(
+        db,
+        `SELECT name, mime_type, file_size
+         FROM attachments
+         WHERE message_id = ${safeInt(messageId)};`
+      );
+      return rows.map((r) => ({
+        filename: sanitizeFilename(String(r.name || "unknown")),
+        mimeType: String(r.mime_type || "application/octet-stream"),
+        size: safeInt(r.file_size ?? 0),
+      }));
+    } catch {
+      // Fall through to MIME parsing
+    }
+  }
+
+  // Fallback: parse MIME headers from .emlx file
+  return parseAttachmentHeaders(messageId, mailboxUrl);
+}
+
+/** Strip path traversal and limit filename length for safety. */
+function sanitizeFilename(name: string): string {
+  return name
+    .replace(/\.\./g, "")
+    .replace(/[/\\]/g, "_")
+    .substring(0, 255);
+}
+
+/**
+ * Extract attachment metadata from MIME headers in an .emlx file.
+ * Scans for Content-Disposition: attachment parts.
+ */
+function parseAttachmentHeaders(
+  messageId: number,
+  mailboxUrl: string
+): { filename: string; mimeType: string; size: number }[] {
+  try {
+    const emlxPath = resolveEmlxPath(messageId, mailboxUrl);
+    if (!emlxPath) return [];
+
+    const buf = readFileSync(emlxPath);
+    const firstNewline = buf.indexOf(0x0a);
+    if (firstNewline === -1) return [];
+    const byteCount = parseInt(buf.subarray(0, firstNewline).toString("utf-8").trim(), 10);
+    if (isNaN(byteCount)) return [];
+
+    const emailStart = firstNewline + 1;
+    const emailContent = buf.subarray(emailStart, emailStart + byteCount).toString("utf-8");
+
+    const attachments: { filename: string; mimeType: string; size: number }[] = [];
+
+    // Split on MIME boundaries and look for attachment parts
+    // Match Content-Disposition: attachment with optional filename
+    const parts = emailContent.split(/^--[\w\-]+$/m);
+    for (const part of parts) {
+      const lower = part.toLowerCase();
+      if (!lower.includes("content-disposition") || !lower.includes("attachment")) continue;
+
+      // Extract filename from Content-Disposition or Content-Type
+      let filename = "unknown";
+      const fnMatch = part.match(/filename\*?=(?:UTF-8''|"?)([^";\r\n]+)/i);
+      if (fnMatch) {
+        filename = decodeURIComponent(fnMatch[1].replace(/^"/, "").replace(/"$/, "").trim());
+      }
+
+      // Extract MIME type from Content-Type
+      let mimeType = "application/octet-stream";
+      const ctMatch = part.match(/Content-Type:\s*([^\s;]+)/i);
+      if (ctMatch) {
+        mimeType = ctMatch[1].trim();
+      }
+
+      // Estimate size from the encoded content length
+      const headerEnd = part.indexOf("\r\n\r\n") >= 0
+        ? part.indexOf("\r\n\r\n") + 4
+        : part.indexOf("\n\n") >= 0
+          ? part.indexOf("\n\n") + 2
+          : -1;
+      const size = headerEnd >= 0 ? Math.floor((part.length - headerEnd) * 0.75) : 0;
+
+      attachments.push({
+        filename: sanitizeFilename(filename),
+        mimeType,
+        size: Math.max(0, size),
+      });
+    }
+
+    return attachments;
+  } catch {
+    return [];
+  }
+}
+
 // ─── Types ───────────────────────────────────────────────────────
 
 export interface Account {
@@ -145,6 +297,12 @@ export interface EmailSummary {
   preview: string;
 }
 
+export interface AttachmentMeta {
+  filename: string;
+  mimeType: string;
+  size: number;
+}
+
 export interface EmailFull extends EmailSummary {
   content: string;
   dateSent: string;
@@ -152,6 +310,7 @@ export interface EmailFull extends EmailSummary {
   messageId: string;
   to: string[];
   cc: string[];
+  attachments: AttachmentMeta[];
 }
 
 // PaginatedResult<T> imported from shared/types.ts
@@ -353,6 +512,9 @@ export async function getEmail(
     }
   }
 
+  // Get attachment metadata
+  const attachments = await queryAttachmentMetadata(safeInt(messageId), mailboxUrl);
+
   const accountMap = await getMailAccountMap(executeJxa);
 
   return {
@@ -371,6 +533,7 @@ export async function getEmail(
     mailbox: parsed?.mailboxName || "",
     account: (parsed ? accountMap.get(parsed.accountId) : undefined) || "",
     preview: content.substring(0, 200),
+    attachments,
   };
 }
 
@@ -542,12 +705,16 @@ export async function replyTo(
   body: string,
   replyAll = false,
   send = true,
-  mailbox = "INBOX",
+  mailbox?: string,
   account?: string
 ): Promise<{ success: boolean; message: string }> {
-  const acctSetup = account
-    ? `const acct = Mail.accounts.byName(${jxaString(account)});`
-    : `const acct = Mail.accounts[0];`;
+  if (!mailbox || !account) {
+    const loc = await resolveMessageLocation(messageId);
+    mailbox = mailbox || loc.mailboxName;
+    account = account || loc.accountName;
+  }
+
+  const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
 
   return executeJxaWrite(`
     const Mail = Application("Mail");
@@ -574,12 +741,16 @@ export async function forwardMessage(
   to: string[],
   body?: string,
   send = true,
-  mailbox = "INBOX",
+  mailbox?: string,
   account?: string
 ): Promise<{ success: boolean; message: string }> {
-  const acctSetup = account
-    ? `const acct = Mail.accounts.byName(${jxaString(account)});`
-    : `const acct = Mail.accounts[0];`;
+  if (!mailbox || !account) {
+    const loc = await resolveMessageLocation(messageId);
+    mailbox = mailbox || loc.mailboxName;
+    account = account || loc.accountName;
+  }
+
+  const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
 
   return executeJxaWrite(`
     const Mail = Application("Mail");
@@ -608,12 +779,16 @@ export async function forwardMessage(
 export async function moveMessage(
   messageId: number,
   targetMailbox: string,
-  sourceMailbox = "INBOX",
+  sourceMailbox?: string,
   account?: string
 ): Promise<{ success: boolean }> {
-  const acctSetup = account
-    ? `const acct = Mail.accounts.byName(${jxaString(account)});`
-    : `const acct = Mail.accounts[0];`;
+  if (!sourceMailbox || !account) {
+    const loc = await resolveMessageLocation(messageId);
+    sourceMailbox = sourceMailbox || loc.mailboxName;
+    account = account || loc.accountName;
+  }
+
+  const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
 
   return executeJxaWrite(`
     const Mail = Application("Mail");
@@ -632,12 +807,16 @@ export async function setMessageFlags(
   messageId: number,
   flagged?: boolean,
   read?: boolean,
-  mailbox = "INBOX",
+  mailbox?: string,
   account?: string
 ): Promise<{ success: boolean }> {
-  const acctSetup = account
-    ? `const acct = Mail.accounts.byName(${jxaString(account)});`
-    : `const acct = Mail.accounts[0];`;
+  if (!mailbox || !account) {
+    const loc = await resolveMessageLocation(messageId);
+    mailbox = mailbox || loc.mailboxName;
+    account = account || loc.accountName;
+  }
+
+  const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
 
   const flagOps: string[] = [];
   if (flagged !== undefined) flagOps.push(`m.flaggedStatus = ${flagged};`);

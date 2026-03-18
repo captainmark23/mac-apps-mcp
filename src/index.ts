@@ -175,6 +175,12 @@ const EmailSummaryZ = z.object({
   preview: z.string().describe("First ~200 chars of email body text — use this to understand what the email is actually about before presenting it to the user"),
 });
 
+const AttachmentMetaZ = z.object({
+  filename: z.string(),
+  mimeType: z.string(),
+  size: z.number().describe("Size in bytes (may be approximate for MIME-parsed attachments)"),
+});
+
 const EmailFullZ = z.object({
   id: z.number(),
   subject: z.string(),
@@ -190,6 +196,7 @@ const EmailFullZ = z.object({
   cc: z.array(z.string()),
   mailbox: z.string(),
   account: z.string(),
+  attachments: z.array(AttachmentMetaZ).describe("Attachment metadata (filename, type, size). Content not included — metadata only."),
 });
 
 const EventSummaryZ = z.object({
@@ -400,8 +407,8 @@ server.registerTool("mail_reply", {
     body: z.string().max(100000).describe("Reply body"),
     replyAll: z.boolean().default(false),
     send: z.boolean().default(true).describe("Send immediately or save as draft"),
-    mailbox: z.string().max(200, "Name too long").default("INBOX"),
-    account: z.string().max(200, "Name too long").optional(),
+    mailbox: z.string().max(200, "Name too long").optional().describe("Mailbox name. If omitted, auto-resolved from the message ID."),
+    account: z.string().max(200, "Name too long").optional().describe("Account name. If omitted, auto-resolved from the message ID."),
   }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -414,14 +421,14 @@ server.registerTool("mail_reply", {
 
 server.registerTool("mail_forward", {
   title: "Forward Email",
-  description: "Forward an email. Set send=false to save as draft for review. Use when: sharing an email with someone else, delegating a message",
+  description: "Forward an email. Set send=false to save as draft for review. Mailbox and account are auto-resolved from the message ID if not provided. Use when: sharing an email with someone else, delegating a message",
   inputSchema: z.object({
     messageId: z.number().describe("Email ID to forward"),
     to: z.array(z.string().email("Invalid email address")).min(1, "At least one recipient required").describe("Forward to these addresses"),
     body: z.string().max(100000).optional().describe("Message to prepend"),
     send: z.boolean().default(true),
-    mailbox: z.string().max(200, "Name too long").default("INBOX"),
-    account: z.string().max(200, "Name too long").optional(),
+    mailbox: z.string().max(200, "Name too long").optional().describe("Mailbox name. If omitted, auto-resolved from the message ID."),
+    account: z.string().max(200, "Name too long").optional().describe("Account name. If omitted, auto-resolved from the message ID."),
   }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -434,12 +441,12 @@ server.registerTool("mail_forward", {
 
 server.registerTool("mail_move", {
   title: "Move Email",
-  description: "Move an email to a different mailbox. Use when: organizing emails into folders, archiving messages",
+  description: "Move an email to a different mailbox. Source mailbox and account are auto-resolved from the message ID if not provided. Use when: organizing emails into folders, archiving messages",
   inputSchema: z.object({
     messageId: z.number(),
     targetMailbox: z.string().max(200, "Name too long").describe("Destination mailbox name"),
-    sourceMailbox: z.string().max(200, "Name too long").default("INBOX"),
-    account: z.string().max(200, "Name too long").optional(),
+    sourceMailbox: z.string().max(200, "Name too long").optional().describe("Source mailbox name. If omitted, auto-resolved from the message ID."),
+    account: z.string().max(200, "Name too long").optional().describe("Account name. If omitted, auto-resolved from the message ID."),
   }).strict(),
   outputSchema: SuccessZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -452,13 +459,13 @@ server.registerTool("mail_move", {
 
 server.registerTool("mail_set_flags", {
   title: "Set Email Flags",
-  description: "Set flagged and/or read status on an email. Use when: marking emails as read/unread, flagging important messages",
+  description: "Set flagged and/or read status on an email. Mailbox and account are auto-resolved from the message ID if not provided. Use when: marking emails as read/unread, flagging important messages",
   inputSchema: z.object({
     messageId: z.number(),
     flagged: z.boolean().optional().describe("Set flagged status"),
     read: z.boolean().optional().describe("Set read status"),
-    mailbox: z.string().max(200, "Name too long").default("INBOX"),
-    account: z.string().max(200, "Name too long").optional(),
+    mailbox: z.string().max(200, "Name too long").optional().describe("Mailbox name. If omitted, auto-resolved from the message ID."),
+    account: z.string().max(200, "Name too long").optional().describe("Account name. If omitted, auto-resolved from the message ID."),
   }).strict(),
   outputSchema: SuccessZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -817,7 +824,7 @@ server.registerTool("reminders_delete", {
 
 server.registerTool("daily_briefing", {
   title: "Daily Briefing",
-  description: "Get a complete daily briefing: today's calendar events, due/overdue reminders, and flagged/unread emails. Each email includes a body preview. When presenting the briefing: (1) Group emails by account. (2) Use the preview field to accurately describe each email — never guess from the subject line. (3) Call mail_get_email for any email you want to summarize in detail. Use when: morning review, getting a quick overview of the day",
+  description: "Get a complete daily briefing: today's calendar events, due/overdue reminders, and flagged/unread emails across all configured mail accounts. Each email includes a body preview. When presenting the briefing: (1) Group emails by account. (2) Use the preview field to accurately describe each email — never guess from the subject line. (3) Call mail_get_email for any email you want to summarize in detail. Use when: morning review, getting a quick overview of the day",
   inputSchema: z.object({
     response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
   }).strict(),
@@ -833,10 +840,15 @@ server.registerTool("daily_briefing", {
       incomplete: z.array(ReminderSummaryZ),
     }),
     mail: z.object({
-      flaggedCount: z.number(),
-      flagged: z.array(EmailSummaryZ),
-      unreadCount: z.number(),
-      unread: z.array(EmailSummaryZ),
+      accounts: z.array(z.object({
+        accountName: z.string(),
+        flaggedCount: z.number(),
+        flagged: z.array(EmailSummaryZ),
+        unreadCount: z.number(),
+        unread: z.array(EmailSummaryZ),
+      })),
+      totalFlaggedCount: z.number(),
+      totalUnreadCount: z.number(),
     }),
     errors: z.array(z.string()).optional(),
   },
@@ -846,25 +858,50 @@ server.registerTool("daily_briefing", {
     const empty = { total: 0, count: 0, offset: 0, items: [] as unknown[], has_more: false };
     type WithError = typeof empty & { error?: string };
 
-    const [eventsResult, dueResult, overdueResult, incompleteResult, flaggedResult, unreadResult] =
+    // Calendar and reminders (not per-account)
+    const [eventsResult, dueResult, overdueResult, incompleteResult] =
       await Promise.all([
         calendar.getEventsToday().catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
         reminders.getReminders(undefined, "due_today").catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
         reminders.getReminders(undefined, "overdue").catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
         reminders.getReminders(undefined, "incomplete").catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
-        mail.getEmails("INBOX", undefined, "flagged", 20).catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
-        mail.getEmails("INBOX", undefined, "unread", 20).catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
       ]);
 
-    // Collect any errors from sub-queries
+    // Mail: fetch per account
     const errors: string[] = [];
+    let accounts: mail.Account[] = [];
+    try {
+      accounts = await mail.listAccounts();
+    } catch (e) {
+      errors.push(`mail_accounts: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    const mailAccounts = await Promise.all(
+      accounts.map(async (acct) => {
+        const [flaggedResult, unreadResult] = await Promise.all([
+          mail.getEmails("INBOX", acct.name, "flagged", 20)
+            .catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
+          mail.getEmails("INBOX", acct.name, "unread", 20)
+            .catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
+        ]);
+        if (flaggedResult.error) errors.push(`mail_flagged(${acct.name}): ${flaggedResult.error}`);
+        if (unreadResult.error) errors.push(`mail_unread(${acct.name}): ${unreadResult.error}`);
+        return {
+          accountName: acct.name,
+          flaggedCount: flaggedResult.total,
+          flagged: flaggedResult.items,
+          unreadCount: unreadResult.total,
+          unread: unreadResult.items,
+        };
+      })
+    );
+
+    // Collect errors from calendar/reminders
     for (const [label, result] of [
       ["calendar", eventsResult],
       ["reminders_due", dueResult],
       ["reminders_overdue", overdueResult],
       ["reminders_incomplete", incompleteResult],
-      ["mail_flagged", flaggedResult],
-      ["mail_unread", unreadResult],
     ] as [string, WithError][]) {
       if (result.error) errors.push(`${label}: ${result.error}`);
     }
@@ -886,10 +923,9 @@ server.registerTool("daily_briefing", {
         incomplete: incompleteResult.items,
       },
       mail: {
-        flaggedCount: flaggedResult.total,
-        flagged: flaggedResult.items,
-        unreadCount: unreadResult.total,
-        unread: unreadResult.items,
+        accounts: mailAccounts,
+        totalFlaggedCount: mailAccounts.reduce((sum, a) => sum + a.flaggedCount, 0),
+        totalUnreadCount: mailAccounts.reduce((sum, a) => sum + a.unreadCount, 0),
       },
       ...(errors.length > 0 ? { errors } : {}),
     };
