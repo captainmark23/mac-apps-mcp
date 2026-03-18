@@ -189,7 +189,23 @@ src/
 
 **Write operations** use JXA (JavaScript for Automation) via `osascript`, which properly interfaces with the app APIs and respects macOS sandboxing. Writes are serialized via a queue and rate-limited (default: 10/minute).
 
+## Logs
+
+The server writes a persistent log to `~/.macos-mcp/macos-mcp.log` (5MB max, 3 rotated backups). Check it if the server crashes or disconnects:
+
+```bash
+tail -50 ~/.macos-mcp/macos-mcp.log
+```
+
 ## Troubleshooting
+
+### Server disconnected in Claude Desktop
+
+Check the log first:
+
+```bash
+cat ~/.macos-mcp/macos-mcp.log
+```
 
 ### Full Disk Access errors
 

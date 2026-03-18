@@ -7,6 +7,10 @@
  * Read operations use SQLite for instant results; writes use JXA.
  */
 
+import { createWriteStream, existsSync, mkdirSync, statSync, renameSync, WriteStream } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -16,6 +20,44 @@ import * as mailFts from "./mail/fts.js";
 import * as calendar from "./calendar/tools.js";
 import * as reminders from "./reminders/tools.js";
 import * as contacts from "./contacts/tools.js";
+
+// ─── Persistent file logging ────────────────────────────────────
+// Writes to ~/.macos-mcp/macos-mcp.log with simple size-based rotation.
+// stderr is still used (stdout is reserved for MCP stdio transport).
+
+const LOG_DIR = join(homedir(), ".macos-mcp");
+const LOG_PATH = join(LOG_DIR, "macos-mcp.log");
+const LOG_MAX_BYTES = 5 * 1024 * 1024; // 5MB
+const LOG_BACKUPS = 3;
+
+if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+
+function rotateLogIfNeeded(): void {
+  try {
+    if (!existsSync(LOG_PATH)) return;
+    const size = statSync(LOG_PATH).size;
+    if (size < LOG_MAX_BYTES) return;
+    // Shift backups: .3 → deleted, .2 → .3, .1 → .2, current → .1
+    for (let i = LOG_BACKUPS; i >= 1; i--) {
+      const src = i === 1 ? LOG_PATH : `${LOG_PATH}.${i - 1}`;
+      const dst = `${LOG_PATH}.${i}`;
+      if (existsSync(src)) renameSync(src, dst);
+    }
+  } catch { /* best-effort rotation */ }
+}
+
+rotateLogIfNeeded();
+let _logStream: WriteStream | null = null;
+try {
+  _logStream = createWriteStream(LOG_PATH, { flags: "a" });
+} catch { /* file logging unavailable — stderr still works */ }
+
+/** Log to both stderr and the persistent log file. */
+function log(message: string): void {
+  const line = `${new Date().toISOString()} [macos-mcp] ${message}\n`;
+  process.stderr.write(line);
+  _logStream?.write(line);
+}
 
 const server = new McpServer({
   name: "macos-mcp-server",
@@ -1038,18 +1080,18 @@ async function autoIndexOnStartup() {
     const isFirstRun = stats.indexedCount === 0;
 
     if (isFirstRun) {
-      console.error(`[macos-mcp] First run — building FTS index for ${stats.totalMessages} messages in background...`);
+      log(`First run — building FTS index for ${stats.totalMessages} messages in background...`);
       const result = await mailFts.rebuildIndex(5_000);
-      console.error(`[macos-mcp] FTS index built: ${result.indexed} messages indexed, ${result.skipped} skipped`);
+      log(`FTS index built: ${result.indexed} messages indexed, ${result.skipped} skipped`);
     } else {
       const result = await mailFts.indexNewMessages(50_000);
       if (result.indexed > 0) {
-        console.error(`[macos-mcp] FTS index updated: ${result.indexed} new messages indexed`);
+        log(`FTS index updated: ${result.indexed} new messages indexed`);
       }
     }
   } catch (e) {
     // Non-fatal — FTS is optional, other tools still work
-    console.error(`[macos-mcp] FTS auto-index skipped: ${e instanceof Error ? e.message : String(e)}`);
+    log(`FTS auto-index skipped: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -1062,6 +1104,7 @@ async function main() {
 }
 
 main().catch((error) => {
+  log(`Server failed to start: ${error}`);
   console.error("Server failed to start:", error);
   process.exit(1);
 });
