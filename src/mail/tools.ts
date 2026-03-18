@@ -48,9 +48,16 @@ async function accountMailboxFilter(
 function parseMailboxUrl(url: string): { accountId: string; mailboxName: string } | null {
   const match = url.match(/^(?:imap|ews|local|pop):\/\/([^/]+)\/(.+)$/);
   if (!match) return null;
+  let mailboxName: string;
+  try {
+    mailboxName = decodeURIComponent(match[2]);
+  } catch {
+    // Malformed percent-encoding — fall back to raw string
+    mailboxName = match[2];
+  }
   return {
     accountId: match[1],
-    mailboxName: decodeURIComponent(match[2]),
+    mailboxName,
   };
 }
 
@@ -134,7 +141,7 @@ async function resolveMessageLocation(
     `SELECT mb.url as mailbox_url
      FROM messages m
      JOIN mailboxes mb ON m.mailbox = mb.ROWID
-     WHERE m.ROWID = ${safeInt(messageId)}
+     WHERE m.ROWID = ${safeInt(messageId)} AND m.deleted = 0
      LIMIT 1;`
   );
   if (!rows.length) throw new Error(`Message not found: ${safeInt(messageId)}`);
@@ -191,8 +198,9 @@ async function queryAttachmentMetadata(
         mimeType: String(r.mime_type || "application/octet-stream"),
         size: safeInt(r.file_size ?? 0),
       }));
-    } catch {
-      // Fall through to MIME parsing
+    } catch (e) {
+      // Fall through to MIME parsing; log so DB errors aren't silently lost
+      console.error(`[mail] attachment query failed for message ${safeInt(messageId)}, falling back to MIME:`, e);
     }
   }
 
@@ -377,8 +385,8 @@ export async function getEmails(
          datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
          m.read, m.flagged, mb.url as mailbox_url
        FROM messages m
-       JOIN subjects s ON m.subject = s.ROWID
-       JOIN addresses a ON m.sender = a.ROWID
+       LEFT JOIN subjects s ON m.subject = s.ROWID
+       LEFT JOIN addresses a ON m.sender = a.ROWID
        JOIN mailboxes mb ON m.mailbox = mb.ROWID
        WHERE m.deleted = 0
          ${mbFilterSql}
@@ -448,14 +456,14 @@ export async function getEmail(
       `SELECT a.address
        FROM recipients rc
        JOIN addresses a ON rc.address_id = a.ROWID
-       WHERE rc.message_id = ${safeInt(messageId)} AND rc.type = 0;`
+       WHERE rc.message = ${safeInt(messageId)} AND rc.type = 0;`
     ),
     sqliteQuery(
       db,
       `SELECT a.address
        FROM recipients rc
        JOIN addresses a ON rc.address_id = a.ROWID
-       WHERE rc.message_id = ${safeInt(messageId)} AND rc.type = 1;`
+       WHERE rc.message = ${safeInt(messageId)} AND rc.type = 1;`
     ),
   ]);
 
@@ -572,8 +580,8 @@ export async function searchMail(
          datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
          m.read, m.flagged, mb.url as mailbox_url
        FROM messages m
-       JOIN subjects s ON m.subject = s.ROWID
-       JOIN addresses a ON m.sender = a.ROWID
+       LEFT JOIN subjects s ON m.subject = s.ROWID
+       LEFT JOIN addresses a ON m.sender = a.ROWID
        JOIN mailboxes mb ON m.mailbox = mb.ROWID
        WHERE m.deleted = 0
          ${mbFilterSql}
@@ -585,8 +593,8 @@ export async function searchMail(
       db,
       `SELECT COUNT(*) as total
        FROM messages m
-       JOIN subjects s ON m.subject = s.ROWID
-       JOIN addresses a ON m.sender = a.ROWID
+       LEFT JOIN subjects s ON m.subject = s.ROWID
+       LEFT JOIN addresses a ON m.sender = a.ROWID
        JOIN mailboxes mb ON m.mailbox = mb.ROWID
        WHERE m.deleted = 0
          ${mbFilterSql}

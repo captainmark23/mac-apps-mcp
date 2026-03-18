@@ -137,24 +137,33 @@ export async function getMailAccountMap(
   }
 }
 
+let _mailAccountRefreshPromise: Promise<void> | null = null;
+
 export async function resolveMailAccountUuid(
   accountName: string,
   executeJxa: <T>(script: string) => Promise<T>
 ): Promise<string | null> {
   if (!_mailAccountPopulated || Date.now() > _mailAccountExpiry) {
-    try {
-      const accounts = await executeJxa<{ name: string; id: string }[]>(`
-        const Mail = Application("Mail");
-        JSON.stringify(Mail.accounts().map(a => ({ name: a.name(), id: a.id() })));
-      `);
-      for (const a of accounts) {
-        _mailAccountCache.set(a.name.toLowerCase(), a.id);
-      }
-    } catch {
-      // Populate flag still set to prevent retries on failure
+    // Use a single in-flight promise to prevent concurrent JXA calls
+    if (!_mailAccountRefreshPromise) {
+      _mailAccountRefreshPromise = (async () => {
+        try {
+          const accounts = await executeJxa<{ name: string; id: string }[]>(`
+            const Mail = Application("Mail");
+            JSON.stringify(Mail.accounts().map(a => ({ name: a.name(), id: a.id() })));
+          `);
+          for (const a of accounts) {
+            _mailAccountCache.set(a.name.toLowerCase(), a.id);
+          }
+        } catch {
+          // Populate flag still set to prevent retries on failure
+        }
+        _mailAccountPopulated = true;
+        _mailAccountExpiry = Date.now() + DEFAULT_CACHE_TTL_MS;
+        _mailAccountRefreshPromise = null;
+      })();
     }
-    _mailAccountPopulated = true;
-    _mailAccountExpiry = Date.now() + DEFAULT_CACHE_TTL_MS;
+    await _mailAccountRefreshPromise;
   }
   return _mailAccountCache.get(accountName.toLowerCase()) ?? null;
 }

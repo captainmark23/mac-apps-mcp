@@ -454,7 +454,7 @@ export async function searchBody(
      FROM email_fts
      WHERE email_fts MATCH CAST(X'${matchHex}' AS TEXT)
      ORDER BY rank
-     LIMIT ${safeInt((safeInt(limit) + safeInt(offset)) * 3)};`
+     LIMIT ${safeInt(safeInt(limit) * 3 + safeInt(offset))};`
   );
 
   if (!ftsResults.length) return paginateRows([], 0, offset);
@@ -468,8 +468,8 @@ export async function searchBody(
          datetime(m.date_received, 'unixepoch', 'localtime') as date_received,
          m.read, m.flagged
        FROM messages m
-       JOIN subjects s ON m.subject = s.ROWID
-       JOIN addresses a ON m.sender = a.ROWID
+       LEFT JOIN subjects s ON m.subject = s.ROWID
+       LEFT JOIN addresses a ON m.sender = a.ROWID
        JOIN mailboxes mb ON m.mailbox = mb.ROWID
        WHERE m.ROWID IN (${rowids})
          AND m.deleted = 0

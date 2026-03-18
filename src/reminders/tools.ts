@@ -279,10 +279,12 @@ export async function completeReminder(
   reminderId: string,
   list: string
 ): Promise<{ success: boolean }> {
+  // Strip x-apple-reminder:// prefix if present for JXA lookup
+  const cleanId = reminderId.replace(REMINDER_ID_PREFIX, "");
   return executeJxaWrite(`
     const Rem = Application("Reminders");
     const l = Rem.lists.byName(${jxaString(list)});
-    const r = l.reminders.byId(${jxaString(reminderId)});
+    const r = l.reminders.byId(${jxaString(cleanId)});
     r.completed = true;
     JSON.stringify({ success: true });
   `);
@@ -292,10 +294,12 @@ export async function deleteReminder(
   reminderId: string,
   list: string
 ): Promise<{ success: boolean }> {
+  // Strip x-apple-reminder:// prefix if present for JXA lookup
+  const cleanId = reminderId.replace(REMINDER_ID_PREFIX, "");
   return executeJxaWrite(`
     const Rem = Application("Reminders");
     const l = Rem.lists.byName(${jxaString(list)});
-    const r = l.reminders.byId(${jxaString(reminderId)});
+    const r = l.reminders.byId(${jxaString(cleanId)});
     Rem.delete(r);
     JSON.stringify({ success: true });
   `);
