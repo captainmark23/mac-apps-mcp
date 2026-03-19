@@ -92,6 +92,7 @@ function err(error: unknown): { isError: true; content: [{ type: "text"; text: s
 
 /** Convert structured data to human-readable markdown. */
 function toMarkdown(data: unknown, indent = 0): string {
+  if (indent > 20) return "[nested]";
   const prefix = "  ".repeat(indent);
   if (data === null || data === undefined) return `${prefix}_none_`;
   if (typeof data === "string") return `${prefix}${data}`;
@@ -652,7 +653,7 @@ server.registerTool("calendar_get_event", {
   title: "Get Event Details",
   description: "Get full details for a specific event including attendees. Use when: viewing event details, checking attendee list or event description",
   inputSchema: z.object({
-    eventId: z.string().describe("Event ID (from calendar_today etc.)"),
+    eventId: z.string().max(500).describe("Event ID (from calendar_today etc.)"),
     calendar: z.string().max(200, "Name too long").describe("Calendar name the event belongs to"),
     response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
   }).strict(),
@@ -690,7 +691,7 @@ server.registerTool("calendar_modify_event", {
   title: "Modify Calendar Event",
   description: "Modify an existing calendar event. You can update the title (summary), start/end dates, location, and/or description. Only include the fields you want to change. Use when: rescheduling a meeting, updating event details",
   inputSchema: z.object({
-    eventId: z.string(),
+    eventId: z.string().max(500),
     calendar: z.string().max(200, "Name too long"),
     summary: z.string().max(1000, "Query too long").optional(),
     startDate: isoDateString.optional(),
@@ -711,7 +712,7 @@ server.registerTool("calendar_delete_event", {
   title: "Delete Calendar Event",
   description: "Delete a calendar event. Use when: cancelling a meeting, removing an event from the calendar",
   inputSchema: z.object({
-    eventId: z.string(),
+    eventId: z.string().max(500),
     calendar: z.string().max(200, "Name too long"),
   }).strict(),
   outputSchema: SuccessZ,
@@ -767,7 +768,7 @@ server.registerTool("reminders_get_detail", {
   title: "Get Reminder Details",
   description: "Get full details for a specific reminder. Use when: viewing reminder notes, checking reminder metadata",
   inputSchema: z.object({
-    reminderId: z.string(),
+    reminderId: z.string().max(500),
     list: z.string().max(200, "Name too long").describe("Reminder list name"),
     response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
   }).strict(),
@@ -804,7 +805,7 @@ server.registerTool("reminders_complete", {
   title: "Complete Reminder",
   description: "Mark a reminder as completed. Use when: finishing a task, checking off a to-do",
   inputSchema: z.object({
-    reminderId: z.string(),
+    reminderId: z.string().max(500),
     list: z.string().max(200, "Name too long"),
   }).strict(),
   outputSchema: SuccessZ,
@@ -820,7 +821,7 @@ server.registerTool("reminders_delete", {
   title: "Delete Reminder",
   description: "Delete a reminder. Use when: removing a task that is no longer needed",
   inputSchema: z.object({
-    reminderId: z.string(),
+    reminderId: z.string().max(500),
     list: z.string().max(200, "Name too long"),
   }).strict(),
   outputSchema: SuccessZ,
@@ -887,7 +888,7 @@ server.registerTool("daily_briefing", {
     try {
       accounts = await mail.listAccounts();
     } catch (e) {
-      errors.push(`mail_accounts: ${e instanceof Error ? e.message : String(e)}`);
+      errors.push(`mail_accounts: ${sanitizeErrorMessage(e instanceof Error ? e.message : String(e))}`);
     }
 
     const mailAccounts = await Promise.all(
@@ -898,8 +899,8 @@ server.registerTool("daily_briefing", {
           mail.getEmails("INBOX", acct.name, "unread", 20)
             .catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
         ]);
-        if (flaggedResult.error) errors.push(`mail_flagged(${acct.name}): ${flaggedResult.error}`);
-        if (unreadResult.error) errors.push(`mail_unread(${acct.name}): ${unreadResult.error}`);
+        if (flaggedResult.error) errors.push(`mail_flagged(${acct.name}): ${sanitizeErrorMessage(flaggedResult.error)}`);
+        if (unreadResult.error) errors.push(`mail_unread(${acct.name}): ${sanitizeErrorMessage(unreadResult.error)}`);
         return {
           accountName: acct.name,
           flaggedCount: flaggedResult.total,
@@ -917,7 +918,7 @@ server.registerTool("daily_briefing", {
       ["reminders_overdue", overdueResult],
       ["reminders_incomplete", incompleteResult],
     ] as [string, WithError][]) {
-      if (result.error) errors.push(`${label}: ${result.error}`);
+      if (result.error) errors.push(`${label}: ${sanitizeErrorMessage(result.error)}`);
     }
 
     const briefing = {
@@ -1004,7 +1005,7 @@ server.registerTool("contacts_get", {
   title: "Get Contact Details",
   description: "Get full details for a specific contact including all emails, phones, addresses, and notes. Use when: viewing complete contact information, getting phone numbers or addresses",
   inputSchema: z.object({
-    contactId: z.string().describe("Contact unique ID (from contacts_list or contacts_search)"),
+    contactId: z.string().max(500).describe("Contact unique ID (from contacts_list or contacts_search)"),
     response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
   }).strict(),
   outputSchema: ContactFullZ.shape,
@@ -1079,7 +1080,7 @@ server.registerResource(
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(await mail.listMailboxes(account as string), null, 2),
+          text: JSON.stringify(await mail.listMailboxes(typeof account === "string" ? account : String(account)), null, 2),
         }],
       };
     } catch (e) {
@@ -1155,6 +1156,6 @@ async function main() {
 
 main().catch((error) => {
   log(`Server failed to start: ${error}`);
-  console.error("Server failed to start:", error);
+  console.error("Server failed to start:", sanitizeErrorMessage(error instanceof Error ? error.message : String(error)));
   process.exit(1);
 });
