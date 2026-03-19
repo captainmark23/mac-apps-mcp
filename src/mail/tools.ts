@@ -212,15 +212,23 @@ async function queryAttachmentMetadata(
     try {
       const rows = await sqliteQuery(
         db,
-        `SELECT name, mime_type, file_size
+        `SELECT name
          FROM attachments
-         WHERE message_id = ${safeInt(messageId)};`
+         WHERE message = ${safeInt(messageId)};`
       );
-      return rows.map((r) => ({
-        filename: sanitizeFilename(String(r.name || "unknown")),
-        mimeType: String(r.mime_type || "application/octet-stream"),
-        size: safeInt(r.file_size ?? 0),
-      }));
+      if (rows.length > 0) {
+        // DB only stores name; get type/size from MIME fallback and merge
+        const mimeInfo = parseAttachmentHeaders(messageId, mailboxUrl);
+        return rows.map((r, i) => {
+          const name = sanitizeFilename(String(r.name || "unknown"));
+          const mime = mimeInfo.find((m) => m.filename === name) || mimeInfo[i];
+          return {
+            filename: name,
+            mimeType: mime?.mimeType || "application/octet-stream",
+            size: mime?.size || 0,
+          };
+        });
+      }
     } catch (e) {
       // Fall through to MIME parsing; log so DB errors aren't silently lost
       console.error(`[mail] attachment query failed for message ${safeInt(messageId)}, falling back to MIME:`, sanitizeErrorMessage(String(e)));
@@ -267,8 +275,8 @@ function parseAttachmentHeaders(
     const attachments: { filename: string; mimeType: string; size: number }[] = [];
 
     // Split on MIME boundaries and look for attachment parts
-    // Match Content-Disposition: attachment with optional filename
-    const parts = emailContent.split(/^--[\w\-]+$/m);
+    // Boundaries can contain alphanumeric, hyphens, plus, equals, underscores, etc.
+    const parts = emailContent.split(/^--[\w\-+='.()/:? ]+$/m);
     for (const part of parts) {
       const lower = part.toLowerCase();
       if (!lower.includes("content-disposition") || !lower.includes("attachment")) continue;
