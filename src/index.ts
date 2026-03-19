@@ -20,6 +20,7 @@ import * as mailFts from "./mail/fts.js";
 import * as calendar from "./calendar/tools.js";
 import * as reminders from "./reminders/tools.js";
 import * as contacts from "./contacts/tools.js";
+import { sanitizeErrorMessage } from "./shared/types.js";
 
 // ─── Persistent file logging ────────────────────────────────────
 // Writes to ~/.macos-mcp/macos-mcp.log with simple size-based rotation.
@@ -52,9 +53,10 @@ try {
   _logStream = createWriteStream(LOG_PATH, { flags: "a" });
 } catch { /* file logging unavailable — stderr still works */ }
 
-/** Log to both stderr and the persistent log file. */
+/** Log to both stderr and the persistent log file. Sanitizes paths from messages. */
 function log(message: string): void {
-  const line = `${new Date().toISOString()} [macos-mcp] ${message}\n`;
+  const sanitized = sanitizeErrorMessage(message);
+  const line = `${new Date().toISOString()} [macos-mcp] ${sanitized}\n`;
   process.stderr.write(line);
   _logStream?.write(line);
 }
@@ -64,10 +66,22 @@ const server = new McpServer({
   version: "0.2.0",
 });
 
-import { sanitizeErrorMessage } from "./shared/types.js";
+/** Reusable Zod schema for ISO 8601 date string parameters. */
+const isoDateString = z.string().refine((s) => !isNaN(new Date(s).getTime()), {
+  message: "Invalid date format. Use ISO 8601 (e.g., '2024-01-15' or '2024-01-15T10:00:00Z')",
+});
 
 /** Maximum characters for a JSON-stringified response before truncation kicks in. */
-const CHARACTER_LIMIT = 25000;
+const MAX_RESPONSE_CHARS = 25_000;
+
+/** Fraction of items to keep each truncation iteration (80% = remove ~20% per pass). */
+const TRUNCATION_KEEP_RATIO = 0.8;
+
+/** Default message limit for FTS auto-index on first run. */
+const FTS_AUTO_INDEX_BATCH = 5_000;
+
+/** Default message limit for FTS incremental index on startup. */
+const FTS_AUTO_INDEX_INCREMENTAL = 50_000;
 
 /** Wrap handler with standard error handling. Sanitizes paths from messages. */
 function err(error: unknown): { isError: true; content: [{ type: "text"; text: string }] } {
@@ -120,7 +134,7 @@ function ok(data: object, pretty = true, format?: string) {
   const result = data as Record<string, unknown>;
   let json = JSON.stringify(result, null, pretty ? 2 : undefined);
 
-  if (json.length > CHARACTER_LIMIT && Array.isArray(result.items)) {
+  if (json.length > MAX_RESPONSE_CHARS && Array.isArray(result.items)) {
     const totalItems = result.items.length;
     let items = [...result.items];
 
@@ -132,14 +146,14 @@ function ok(data: object, pretty = true, format?: string) {
         truncation_message: `Response truncated. Use pagination (offset/limit) or filters to narrow results. Showing ${items.length} of ${totalItems} items.`,
       };
       const candidateJson = JSON.stringify(candidate, null, pretty ? 2 : undefined);
-      if (candidateJson.length <= CHARACTER_LIMIT) {
+      if (candidateJson.length <= MAX_RESPONSE_CHARS) {
         return {
           content: [{ type: "text" as const, text: candidateJson }],
           structuredContent: candidate,
         };
       }
       // Remove ~20% of remaining items each iteration
-      items = items.slice(0, Math.max(Math.floor(items.length * 0.8), items.length - 1));
+      items = items.slice(0, Math.max(Math.floor(items.length * TRUNCATION_KEEP_RATIO), items.length - 1));
     }
 
     // Fallback: no items fit
@@ -618,8 +632,8 @@ server.registerTool("calendar_get_events", {
   title: "Get Events by Date Range",
   description: "Get events in a date range. Dates should be ISO 8601 format (e.g. 2026-03-08). Returns pagination metadata. Use when: looking up events in a date range, checking availability for a period",
   inputSchema: z.object({
-    startDate: z.string().describe("Start date (ISO 8601, e.g. 2026-03-08)"),
-    endDate: z.string().describe("End date (ISO 8601)"),
+    startDate: isoDateString.describe("Start date (ISO 8601, e.g. 2026-03-08)"),
+    endDate: isoDateString.describe("End date (ISO 8601)"),
     calendar: z.string().max(200, "Name too long").optional(),
     limit: z.number().min(1).max(500).default(200).describe("Max events to return"),
     offset: z.number().min(0).default(0).describe("Number of results to skip for pagination"),
@@ -656,8 +670,8 @@ server.registerTool("calendar_create_event", {
   description: "Create a new calendar event. Use when: scheduling a meeting, adding an event to the calendar",
   inputSchema: z.object({
     summary: z.string().max(1000, "Query too long").describe("Event title"),
-    startDate: z.string().describe("Start date/time (ISO 8601)"),
-    endDate: z.string().describe("End date/time (ISO 8601)"),
+    startDate: isoDateString.describe("Start date/time (ISO 8601)"),
+    endDate: isoDateString.describe("End date/time (ISO 8601)"),
     calendar: z.string().max(200, "Name too long").optional().describe("Calendar name (default: first calendar)"),
     location: z.string().max(1000).optional(),
     description: z.string().max(1000).optional(),
@@ -679,8 +693,8 @@ server.registerTool("calendar_modify_event", {
     eventId: z.string(),
     calendar: z.string().max(200, "Name too long"),
     summary: z.string().max(1000, "Query too long").optional(),
-    startDate: z.string().optional(),
-    endDate: z.string().optional(),
+    startDate: isoDateString.optional(),
+    endDate: isoDateString.optional(),
     location: z.string().max(1000).optional(),
     description: z.string().max(1000).optional(),
   }).strict(),
@@ -772,7 +786,7 @@ server.registerTool("reminders_create", {
   inputSchema: z.object({
     name: z.string().max(1000, "Query too long").describe("Reminder title"),
     list: z.string().max(200, "Name too long").optional().describe("List name (default: default list)"),
-    dueDate: z.string().optional().describe("Due date (ISO 8601)"),
+    dueDate: isoDateString.optional().describe("Due date (ISO 8601)"),
     body: z.string().max(10000).optional().describe("Notes/description"),
     priority: z.number().min(0).max(9).optional().describe("Priority: 0=none, 1=high, 5=medium, 9=low"),
     flagged: z.boolean().optional(),
@@ -1117,10 +1131,10 @@ async function autoIndexOnStartup() {
 
     if (isFirstRun) {
       log(`First run — building FTS index for ${stats.totalMessages} messages in background...`);
-      const result = await mailFts.rebuildIndex(5_000);
+      const result = await mailFts.rebuildIndex(FTS_AUTO_INDEX_BATCH);
       log(`FTS index built: ${result.indexed} messages indexed, ${result.skipped} skipped`);
     } else {
-      const result = await mailFts.indexNewMessages(50_000);
+      const result = await mailFts.indexNewMessages(FTS_AUTO_INDEX_INCREMENTAL);
       if (result.indexed > 0) {
         log(`FTS index updated: ${result.indexed} new messages indexed`);
       }

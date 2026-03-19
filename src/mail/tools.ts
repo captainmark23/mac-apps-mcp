@@ -14,6 +14,22 @@ import { readFileSync, statSync } from "node:fs";
 
 /** Maximum .emlx file size to read (50 MB). Larger files are skipped to prevent OOM. */
 const MAX_EMLX_SIZE = 50 * 1024 * 1024;
+
+/** Maximum characters of cleaned body text to return for display. */
+const MAX_BODY_DISPLAY_CHARS = 50_000;
+
+/** Maximum characters for the short body preview shown in email lists. */
+const MAX_PREVIEW_CHARS = 200;
+
+/** Maximum characters for filenames (path traversal defense). */
+const MAX_FILENAME_LENGTH = 255;
+
+/** Minimum length threshold for a long URL to be removed from body display. */
+const LONG_URL_MIN_LENGTH = 100;
+
+/** Minimum length threshold for base64/encoded content to be removed from body display. */
+const ENCODED_CONTENT_MIN_LENGTH = 200;
+
 import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
 import { sqliteQuery, sqlEscape, sqlLikeEscape, safeInt } from "../shared/sqlite.js";
 import {
@@ -48,7 +64,7 @@ async function accountMailboxFilter(
 }
 
 /** Parse a mailbox URL into account ID and mailbox name. */
-function parseMailboxUrl(url: string): { accountId: string; mailboxName: string } | null {
+export function parseMailboxUrl(url: string): { accountId: string; mailboxName: string } | null {
   const match = url.match(/^(?:imap|ews|local|pop):\/\/([^/]+)\/(.+)$/);
   if (!match) return null;
   let mailboxName: string;
@@ -111,13 +127,13 @@ function parseEmlxHeaders(filePath: string): { messageId: string; replyTo: strin
 }
 
 /** Clean raw .emlx body for display (more generous limit than FTS indexing). */
-function cleanBodyForDisplay(raw: string): string {
+export function cleanBodyForDisplay(raw: string): string {
   let text = decodeQuotedPrintable(raw);
   text = stripHtml(text);
-  text = text.replace(/https?:\/\/\S{100,}/g, "[long URL removed]");
-  text = text.replace(/[A-Za-z0-9+/=]{200,}/g, "[encoded content removed]");
+  text = text.replace(new RegExp(`https?:\\/\\/\\S{${LONG_URL_MIN_LENGTH},}`, "g"), "[long URL removed]");
+  text = text.replace(new RegExp(`[A-Za-z0-9+/=]{${ENCODED_CONTENT_MIN_LENGTH},}`, "g"), "[encoded content removed]");
   text = text.replace(/\s+/g, " ").trim();
-  return text.substring(0, 50_000);
+  return text.substring(0, MAX_BODY_DISPLAY_CHARS);
 }
 
 /** Get a short body preview for an email (first ~200 chars of cleaned body). */
@@ -129,7 +145,7 @@ function getBodyPreview(messageId: number, mailboxUrl: string): string {
     let text = decodeQuotedPrintable(rawBody);
     text = stripHtml(text);
     text = text.replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim();
-    return text.substring(0, 200);
+    return text.substring(0, MAX_PREVIEW_CHARS);
   } catch {
     return "";
   }
@@ -216,11 +232,11 @@ async function queryAttachmentMetadata(
 }
 
 /** Strip path traversal and limit filename length for safety. */
-function sanitizeFilename(name: string): string {
+export function sanitizeFilename(name: string): string {
   return name
     .replace(/\.\./g, "")
     .replace(/[/\\]/g, "_")
-    .substring(0, 255);
+    .substring(0, MAX_FILENAME_LENGTH);
 }
 
 /**
@@ -551,7 +567,7 @@ export async function getEmail(
     cc: ccRows.map((c) => String(c.address || "")),
     mailbox: parsed?.mailboxName || "",
     account: (parsed ? accountMap.get(parsed.accountId) : undefined) || "",
-    preview: content.substring(0, 200),
+    preview: content.substring(0, MAX_PREVIEW_CHARS),
     attachments,
   };
 }

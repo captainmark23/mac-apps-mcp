@@ -16,6 +16,15 @@ import { sqliteQuery, sqlEscape, safeInt } from "../shared/sqlite.js";
 import { getCalendarNames } from "../shared/config.js";
 import { PaginatedResult, paginateArray, CORE_DATA_EPOCH_OFFSET, fromCoreDataTimestamp } from "../shared/types.js";
 
+/** Seconds in one day. Used for date-range queries and day boundary calculations. */
+const SECONDS_PER_DAY = 86400;
+
+/** Milliseconds in one day. Used for date arithmetic. */
+const MS_PER_DAY = 86_400_000;
+
+/** Maximum rows to fetch from OccurrenceCache before post-filtering. */
+const MAX_OCCURRENCE_QUERY_ROWS = 2000;
+
 /**
  * macOS stores Calendar data in a SQLite database.
  * Dates use Core Data epoch (2001-01-01) — offset from Unix epoch by 978307200 seconds.
@@ -92,12 +101,12 @@ function calendarWhereClause(calendar?: string): string {
 }
 
 /** Convert a JS Date or ISO string to Core Data timestamp. */
-function toCoreDataTimestamp(dateStr: string): number {
+export function toCoreDataTimestamp(dateStr: string): number {
   return Math.floor(new Date(dateStr).getTime() / 1000) - CORE_DATA_EPOCH_OFFSET;
 }
 
 /** Map numeric status to human-readable string. */
-function statusLabel(status: string | null): string {
+export function statusLabel(status: string | null): string {
   switch (status) {
     case "0": return "none";
     case "1": return "confirmed";
@@ -108,7 +117,7 @@ function statusLabel(status: string | null): string {
 }
 
 /** Map participant status to human-readable string. */
-function participantStatusLabel(status: string | null): string {
+export function participantStatusLabel(status: string | null): string {
   switch (status) {
     case "0": return "unknown";
     case "1": return "pending";
@@ -120,7 +129,7 @@ function participantStatusLabel(status: string | null): string {
 }
 
 /** Map a SQLite row to an EventSummary. */
-function rowToEventSummary(r: Record<string, string | number | null>): EventSummary {
+export function rowToEventSummary(r: Record<string, string | number | null>): EventSummary {
   return {
     id: String(r.UUID || ""),
     summary: String(r.summary || ""),
@@ -166,11 +175,11 @@ export async function getEvents(
   const rows = await sqliteQuery(
     CALENDAR_DB,
     `${EVENT_SELECT}
-     WHERE oc.day >= ${safeInt(startTs)} - 86400
+     WHERE oc.day >= ${safeInt(startTs)} - ${SECONDS_PER_DAY}
        AND oc.day < ${safeInt(endTs)}
        ${calFilter}
      ORDER BY computed_start
-     LIMIT 2000;`
+     LIMIT ${MAX_OCCURRENCE_QUERY_ROWS};`
   );
 
   // Post-filter for precise range (day column is date-granularity)
@@ -193,7 +202,7 @@ export async function getEventsToday(
 ): Promise<PaginatedResult<EventSummary>> {
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const endOfDay = new Date(startOfDay.getTime() + 86400_000);
+  const endOfDay = new Date(startOfDay.getTime() + MS_PER_DAY);
   return getEvents(startOfDay.toISOString(), endOfDay.toISOString(), calendar, limit, offset);
 }
 
@@ -204,7 +213,7 @@ export async function getEventsThisWeek(
 ): Promise<PaginatedResult<EventSummary>> {
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const endOfWeek = new Date(startOfDay.getTime() + 7 * 86400_000);
+  const endOfWeek = new Date(startOfDay.getTime() + 7 * MS_PER_DAY);
   return getEvents(startOfDay.toISOString(), endOfWeek.toISOString(), calendar, limit, offset);
 }
 

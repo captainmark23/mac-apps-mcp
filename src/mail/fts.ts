@@ -28,6 +28,30 @@ const SQLITE3 = "/usr/bin/sqlite3";
 /** Maximum .emlx file size to read (50 MB). Larger files are skipped to prevent OOM. */
 const MAX_EMLX_SIZE = 50 * 1024 * 1024;
 
+/** Maximum characters to index per email body. Keeps DB manageable while providing good search coverage. */
+const MAX_FTS_BODY_CHARS = 10_000;
+
+/** Number of messages to process per SQL batch during indexing. */
+const FTS_BATCH_SIZE = 100;
+
+/** Timeout (ms) for FTS database operations. */
+const FTS_EXEC_TIMEOUT_MS = 120_000;
+
+/** Max buffer size (bytes) for FTS database output. */
+const FTS_EXEC_MAX_BUFFER = 10 * 1024 * 1024;
+
+/** SQLite busy timeout (ms) to prevent lock errors during background indexing. */
+const FTS_BUSY_TIMEOUT_MS = 5000;
+
+/** Minimum length for a long URL to be stripped during body cleanup for indexing. */
+const FTS_LONG_URL_MIN_LENGTH = 50;
+
+/** Minimum length for base64 blocks to be stripped during body cleanup for indexing. */
+const FTS_BASE64_MIN_LENGTH = 100;
+
+/** Minimum body text length to count as "indexed" (vs skipped). */
+const FTS_MIN_INDEXED_BODY_LENGTH = 10;
+
 
 // ─── .emlx Path Resolution ──────────────────────────────────────
 
@@ -192,13 +216,13 @@ function cleanBodyForIndex(raw: string): string {
   // Strip HTML once
   text = stripHtml(text);
   // Remove long URLs
-  text = text.replace(/https?:\/\/\S{50,}/g, "");
+  text = text.replace(new RegExp(`https?:\\/\\/\\S{${FTS_LONG_URL_MIN_LENGTH},}`, "g"), "");
   // Remove base64 blocks
-  text = text.replace(/[A-Za-z0-9+/=]{100,}/g, "");
+  text = text.replace(new RegExp(`[A-Za-z0-9+/=]{${FTS_BASE64_MIN_LENGTH},}`, "g"), "");
   // Collapse whitespace again after cleanup
   text = text.replace(/\s+/g, " ").trim();
-  // Limit to 10KB for indexing (plenty for search, keeps DB manageable)
-  return text.substring(0, 10_000);
+  // Limit for indexing (plenty for search, keeps DB manageable)
+  return text.substring(0, MAX_FTS_BODY_CHARS);
 }
 
 // ─── FTS5 Index Management ──────────────────────────────────────
@@ -207,14 +231,14 @@ function cleanBodyForIndex(raw: string): string {
 async function ftsExec(sql: string): Promise<void> {
   // Enable WAL mode and busy timeout to prevent "database is locked" errors
   // during background indexing of large mailboxes.
-  const preamble = "PRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=5000;\n";
+  const preamble = `PRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=${FTS_BUSY_TIMEOUT_MS};\n`;
   const input = preamble + sql;
 
   return new Promise<void>((resolve, reject) => {
     const child = execFileCb(
       SQLITE3,
       [FTS_DB],
-      { timeout: 120_000, maxBuffer: 10 * 1024 * 1024 },
+      { timeout: FTS_EXEC_TIMEOUT_MS, maxBuffer: FTS_EXEC_MAX_BUFFER },
       (error) => {
         if (error) reject(error);
         else resolve();
@@ -305,9 +329,8 @@ export async function indexNewMessages(
   const now = Math.floor(Date.now() / 1000);
 
   // Process in batches to avoid huge SQL statements
-  const BATCH_SIZE = 100;
-  for (let i = 0; i < messages.length; i += BATCH_SIZE) {
-    const batch = messages.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < messages.length; i += FTS_BATCH_SIZE) {
+    const batch = messages.slice(i, i + FTS_BATCH_SIZE);
     const inserts: string[] = [];
 
     for (const msg of batch) {
@@ -328,7 +351,7 @@ export async function indexNewMessages(
         // Use hex encoding to safely embed body in SQL (avoids all escaping issues)
         const hexBody = Buffer.from(body, "utf-8").toString("hex");
         inserts.push(`INSERT OR IGNORE INTO email_content(rowid, body, indexed_at) VALUES(${rowid}, CAST(X'${hexBody}' AS TEXT), ${now});`);
-        if (body.length > 10) {
+        if (body.length > FTS_MIN_INDEXED_BODY_LENGTH) {
           indexed++;
         } else {
           skipped++;
@@ -345,7 +368,7 @@ export async function indexNewMessages(
 
     if (onProgress) {
       onProgress(
-        Math.min(i + BATCH_SIZE, messages.length),
+        Math.min(i + FTS_BATCH_SIZE, messages.length),
         messages.length,
         `Indexed ${indexed} messages, ${skipped} skipped`
       );

@@ -121,7 +121,7 @@ export type { PaginatedResult } from "../shared/types.js";
  * Parse macOS address book label format.
  * Apple stores labels like "_$!<Home>!$_" — we extract the inner text.
  */
-function parseLabel(raw: string | null): string {
+export function parseLabel(raw: string | null): string {
   if (!raw) return "";
   const match = raw.match(/_\$!<(.+?)>!\$_/);
   return match ? match[1] : raw;

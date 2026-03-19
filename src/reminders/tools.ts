@@ -16,7 +16,10 @@ import { sqliteQuery, sqlEscape, safeInt } from "../shared/sqlite.js";
 import { getReminderLists } from "../shared/config.js";
 import { PaginatedResult, paginateRows, CORE_DATA_EPOCH_OFFSET, fromCoreDataTimestamp } from "../shared/types.js";
 
-const REMINDER_ID_PREFIX = "x-apple-reminder://";
+export const REMINDER_ID_PREFIX = "x-apple-reminder://";
+
+/** Seconds in one day. Used for due-date boundary calculations. */
+const SECONDS_PER_DAY = 86400;
 
 /**
  * Find the active Reminders SQLite database.
@@ -139,7 +142,7 @@ export async function getReminders(
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const startOfDayTs = Math.floor(startOfDay.getTime() / 1000) - CORE_DATA_EPOCH_OFFSET;
-  const endOfDayTs = startOfDayTs + 86400;
+  const endOfDayTs = startOfDayTs + SECONDS_PER_DAY;
   const nowTs = Math.floor(now.getTime() / 1000) - CORE_DATA_EPOCH_OFFSET;
 
   let filterSql: string;

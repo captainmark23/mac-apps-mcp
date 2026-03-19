@@ -17,7 +17,7 @@
     "start": "node build/index.js",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test build/__tests__/shared.test.js",
+    "test": "tsc && node --test build/__tests__/*.test.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
