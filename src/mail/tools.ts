@@ -38,7 +38,7 @@ import {
   getMailAccountMap,
   resolveMailAccountUuid,
 } from "../shared/config.js";
-import { PaginatedResult, paginateRows } from "../shared/types.js";
+import { PaginatedResult, paginateRows, sanitizeErrorMessage } from "../shared/types.js";
 import {
   resolveEmlxPath,
   parseEmlxBody,
@@ -223,7 +223,7 @@ async function queryAttachmentMetadata(
       }));
     } catch (e) {
       // Fall through to MIME parsing; log so DB errors aren't silently lost
-      console.error(`[mail] attachment query failed for message ${safeInt(messageId)}, falling back to MIME:`, e);
+      console.error(`[mail] attachment query failed for message ${safeInt(messageId)}, falling back to MIME:`, sanitizeErrorMessage(String(e)));
     }
   }
 
