@@ -119,9 +119,107 @@ export function resolveEmlxPath(rowid: number, mailboxUrl: string): string | nul
 
 // ─── .emlx Parsing ──────────────────────────────────────────────
 
+/** Find the position where headers end (double newline). Returns -1 if not found. */
+function findHeaderBodySplit(text: string): { pos: number; skip: number } {
+  const crlfPos = text.indexOf("\r\n\r\n");
+  const lfPos = text.indexOf("\n\n");
+  if (crlfPos >= 0 && lfPos >= 0) {
+    return crlfPos < lfPos ? { pos: crlfPos, skip: 4 } : { pos: lfPos, skip: 2 };
+  }
+  if (crlfPos >= 0) return { pos: crlfPos, skip: 4 };
+  if (lfPos >= 0) return { pos: lfPos, skip: 2 };
+  return { pos: -1, skip: 0 };
+}
+
+/** Get a header value from raw headers (handles folded lines). */
+function getHeader(headers: string, name: string): string {
+  const unfolded = headers.replace(/\r?\n[ \t]+/g, " ");
+  const re = new RegExp(`^${name}:\\s*(.*)$`, "im");
+  const m = unfolded.match(re);
+  return m ? m[1].trim() : "";
+}
+
+/**
+ * Decode a MIME part body based on its Content-Transfer-Encoding.
+ */
+function decodeMimePartBody(body: string, encoding: string): string {
+  const enc = encoding.toLowerCase().trim();
+  if (enc === "base64") {
+    try {
+      return Buffer.from(body.replace(/\s/g, ""), "base64").toString("utf-8");
+    } catch {
+      return body;
+    }
+  }
+  if (enc === "quoted-printable") {
+    return decodeQuotedPrintable(body);
+  }
+  return body;
+}
+
+/**
+ * Extract readable text from a MIME body (handles multipart and base64).
+ * Recursively walks multipart structures, preferring text/plain over text/html.
+ */
+function extractTextFromMime(headers: string, body: string): string {
+  const rawContentType = getHeader(headers, "Content-Type");
+  const contentType = rawContentType.toLowerCase();
+  const encoding = getHeader(headers, "Content-Transfer-Encoding");
+
+  // Simple text part — decode and return
+  if (contentType.startsWith("text/plain") || (!contentType && !body.startsWith("--"))) {
+    return decodeMimePartBody(body, encoding);
+  }
+  if (contentType.startsWith("text/html")) {
+    return decodeMimePartBody(body, encoding);
+  }
+
+  // Multipart — extract boundary from original-case header to preserve case
+  const boundaryMatch = rawContentType.match(/boundary="?([^";\s]+)"?/i)
+    || headers.match(/boundary="?([^";\s]+)"?/i);
+  if (!boundaryMatch) {
+    // Not multipart and not text — try decoding as-is
+    return decodeMimePartBody(body, encoding);
+  }
+
+  const boundary = boundaryMatch[1];
+  const parts = body.split("--" + boundary);
+  // First element is preamble, last (after --boundary--) is epilogue
+  const realParts = parts.slice(1).filter(p => !p.startsWith("--"));
+
+  let plainText = "";
+  let htmlText = "";
+
+  for (const part of realParts) {
+    const split = findHeaderBodySplit(part);
+    if (split.pos < 0) continue;
+    const partHeaders = part.substring(0, split.pos);
+    const partBody = part.substring(split.pos + split.skip);
+    const partCt = getHeader(partHeaders, "Content-Type").toLowerCase();
+
+    if (partCt.startsWith("multipart/")) {
+      // Nested multipart — recurse
+      const nested = extractTextFromMime(partHeaders, partBody);
+      if (nested) {
+        if (!plainText) plainText = nested;
+      }
+    } else if (partCt.startsWith("text/plain") || (!partCt && !partBody.startsWith("--"))) {
+      const partEnc = getHeader(partHeaders, "Content-Transfer-Encoding");
+      plainText = decodeMimePartBody(partBody, partEnc);
+    } else if (partCt.startsWith("text/html")) {
+      const partEnc = getHeader(partHeaders, "Content-Transfer-Encoding");
+      htmlText = decodeMimePartBody(partBody, partEnc);
+    }
+  }
+
+  // Prefer plain text, fall back to HTML
+  return plainText || htmlText || body;
+}
+
 /**
  * Extract plain text body from an .emlx file.
  * Format: first line is byte count, then RFC 822 email, then Apple plist metadata.
+ * Handles multipart MIME, base64, and quoted-printable encoding.
  */
 export function parseEmlxBody(filePath: string): string {
   try {
@@ -145,22 +243,13 @@ export function parseEmlxBody(filePath: string): string {
   const emailContent = buf.subarray(emailStart, emailStart + byteCount).toString("utf-8");
 
   // Split headers from body (double newline separates them)
-  const headerEnd = emailContent.indexOf("\r\n\r\n");
-  const headerEnd2 = emailContent.indexOf("\n\n");
-  const splitPos =
-    headerEnd >= 0 && headerEnd2 >= 0
-      ? Math.min(headerEnd, headerEnd2)
-      : headerEnd >= 0
-        ? headerEnd
-        : headerEnd2;
+  const split = findHeaderBodySplit(emailContent);
+  if (split.pos < 0) return "";
 
-  if (splitPos < 0) return "";
+  const headers = emailContent.substring(0, split.pos);
+  const body = emailContent.substring(split.pos + split.skip);
 
-  const body = emailContent.substring(
-    splitPos + (emailContent[splitPos] === "\r" ? 4 : 2)
-  );
-
-  return body;
+  return extractTextFromMime(headers, body);
 }
 
 /**
