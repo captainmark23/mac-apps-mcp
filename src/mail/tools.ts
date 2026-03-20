@@ -10,8 +10,11 @@
  * move_message, flag_message, mark_read
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync, unlinkSync } from "node:fs";
 import { execFile as execFileCb } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /** Maximum .emlx file size to read (50 MB). Larger files are skipped to prevent OOM. */
 const MAX_EMLX_SIZE = 50 * 1024 * 1024;
@@ -669,6 +672,7 @@ function asString(s: string): string {
 /**
  * Send or create an HTML email using AppleScript's `set html content of`.
  * AppleScript can set html content on outgoing messages (JXA cannot).
+ * Writes the HTML body and script to temp files to avoid command-line length limits.
  */
 async function sendHtmlViaAppleScript(opts: {
   to: string[];
@@ -699,7 +703,15 @@ async function sendHtmlViaAppleScript(opts: {
 
   const sendLine = opts.send ? "send newMsg" : "";
 
+  // Write HTML to temp file to avoid AppleScript string length limits
+  const id = randomUUID();
+  const htmlFile = join(tmpdir(), `macos-mcp-html-${id}.html`);
+  const scriptFile = join(tmpdir(), `macos-mcp-script-${id}.scpt`);
+
   const script = `
+set htmlFile to POSIX file ${asString(htmlFile)}
+set htmlContent to read htmlFile as «class utf8»
+
 tell application "Mail"
     ${acctLine}
     try
@@ -713,24 +725,32 @@ tell application "Mail"
         ${ccRecipients}
         ${bccRecipients}
     end tell
-    set html content of newMsg to ${asString(opts.htmlBody)}
+    set html content of newMsg to htmlContent
     ${sendLine}
 end tell`;
 
-  return new Promise((resolve, reject) => {
-    execFileCb(
-      "/usr/bin/osascript",
-      ["-e", script],
-      { timeout: 30000, maxBuffer: 10 * 1024 * 1024 },
-      (err) => {
-        if (err) reject(new Error(`AppleScript error: ${err.message}`));
-        else resolve({
-          success: true,
-          message: opts.send ? "HTML email sent" : "HTML draft created — review in Mail.app",
-        });
-      }
-    );
-  });
+  try {
+    writeFileSync(htmlFile, opts.htmlBody, "utf-8");
+    writeFileSync(scriptFile, script, "utf-8");
+
+    return await new Promise((resolve, reject) => {
+      execFileCb(
+        "/usr/bin/osascript",
+        [scriptFile],
+        { timeout: 30000, maxBuffer: 10 * 1024 * 1024 },
+        (err) => {
+          if (err) reject(new Error(`AppleScript error: ${err.message}`));
+          else resolve({
+            success: true,
+            message: opts.send ? "HTML email sent" : "HTML draft created — review in Mail.app",
+          });
+        }
+      );
+    });
+  } finally {
+    try { unlinkSync(htmlFile); } catch {}
+    try { unlinkSync(scriptFile); } catch {}
+  }
 }
 
 // ─── Write Tools (JXA — requires Mail.app, serialized via queue) ─
