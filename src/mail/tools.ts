@@ -10,11 +10,8 @@
  * move_message, flag_message, mark_read
  */
 
-import { readFileSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { execFile as execFileCb } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 /** Maximum .emlx file size to read (50 MB). Larger files are skipped to prevent OOM. */
 const MAX_EMLX_SIZE = 50 * 1024 * 1024;
@@ -662,111 +659,74 @@ export async function searchMail(
   return paginateRows(items, total, offset);
 }
 
-// ─── MIME Email Builder ──────────────────────────────────────────
+// ─── AppleScript HTML Email ──────────────────────────────────────
 
-/** Build a raw MIME multipart/alternative email with text/plain and text/html parts. */
-function buildMimeEmail(opts: {
-  from: string;
-  to: string[];
-  subject: string;
-  body: string;
-  htmlBody: string;
-  cc?: string[];
-  bcc?: string[];
-}): string {
-  const boundary = `----=_Part_${randomUUID()}`;
-  const lines: string[] = [];
-
-  lines.push(`From: ${opts.from}`);
-  lines.push(`To: ${opts.to.join(", ")}`);
-  if (opts.cc?.length) lines.push(`Cc: ${opts.cc.join(", ")}`);
-  if (opts.bcc?.length) lines.push(`Bcc: ${opts.bcc.join(", ")}`);
-  lines.push(`Subject: ${opts.subject}`);
-  lines.push(`MIME-Version: 1.0`);
-  lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
-  lines.push(``);
-  lines.push(`--${boundary}`);
-  lines.push(`Content-Type: text/plain; charset="UTF-8"`);
-  lines.push(`Content-Transfer-Encoding: 7bit`);
-  lines.push(``);
-  lines.push(opts.body);
-  lines.push(``);
-  lines.push(`--${boundary}`);
-  lines.push(`Content-Type: text/html; charset="UTF-8"`);
-  lines.push(`Content-Transfer-Encoding: 7bit`);
-  lines.push(``);
-  lines.push(opts.htmlBody);
-  lines.push(``);
-  lines.push(`--${boundary}--`);
-
-  return lines.join("\r\n");
-}
-
-/** Get the sender address for an account via JXA. */
-async function getSenderAddress(account?: string): Promise<string> {
-  const acctSetup = account
-    ? `const acct = Mail.accounts.byName(${jxaString(account)});`
-    : `const acct = Mail.accounts[0];`;
-
-  return executeJxa<string>(`
-    const Mail = Application("Mail");
-    ${acctSetup}
-    JSON.stringify(acct.emailAddresses()[0]);
-  `);
+/** Escape a string for embedding in AppleScript (double-quoted string). */
+function asString(s: string): string {
+  return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
 }
 
 /**
- * Send an HTML email by writing a .eml file and opening it with Mail.app,
- * then using JXA to send the resulting outgoing message.
+ * Send or create an HTML email using AppleScript's `set html content of`.
+ * AppleScript can set html content on outgoing messages (JXA cannot).
  */
-async function sendHtmlViaEml(opts: {
-  from: string;
+async function sendHtmlViaAppleScript(opts: {
   to: string[];
   subject: string;
   body: string;
   htmlBody: string;
   cc?: string[];
   bcc?: string[];
+  account?: string;
   send: boolean;
 }): Promise<{ success: boolean; message: string }> {
-  const mime = buildMimeEmail(opts);
-  const emlPath = join(tmpdir(), `macos-mcp-${randomUUID()}.eml`);
+  const acctLine = opts.account
+    ? `set acct to account ${asString(opts.account)}`
+    : `set acct to first account`;
+  const visible = opts.send ? "false" : "true";
 
-  try {
-    writeFileSync(emlPath, mime);
+  const toRecipients = opts.to
+    .map((addr) => `make new to recipient at end of to recipients with properties {address:${asString(addr)}}`)
+    .join("\n        ");
 
-    // Open the .eml file with Mail.app — creates a compose window
-    await new Promise<void>((resolve, reject) => {
-      execFileCb("/usr/bin/open", ["-a", "Mail", emlPath], { timeout: 10000 }, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+  const ccRecipients = (opts.cc || [])
+    .map((addr) => `make new cc recipient at end of cc recipients with properties {address:${asString(addr)}}`)
+    .join("\n        ");
 
-    if (opts.send) {
-      // Wait for Mail to process the file and create the outgoing message
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+  const bccRecipients = (opts.bcc || [])
+    .map((addr) => `make new bcc recipient at end of bcc recipients with properties {address:${asString(addr)}}`)
+    .join("\n        ");
 
-      // Find and send the outgoing message matching our subject
-      await executeJxaWrite(`
-        const Mail = Application("Mail");
-        const msgs = Mail.outgoingMessages();
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          if (msgs[i].subject() === ${jxaString(opts.subject)}) {
-            msgs[i].send();
-            break;
-          }
-        }
-        JSON.stringify({ success: true, message: "HTML email sent" });
-      `);
+  const sendLine = opts.send ? "send newMsg" : "";
 
-      return { success: true, message: "HTML email sent" };
-    }
+  const script = `
+tell application "Mail"
+    ${acctLine}
+    set senderAddr to first item of (email addresses of acct)
+    set newMsg to make new outgoing message with properties {subject:${asString(opts.subject)}, content:${asString(opts.body)}, sender:senderAddr, visible:${visible}}
+    tell newMsg
+        ${toRecipients}
+        ${ccRecipients}
+        ${bccRecipients}
+    end tell
+    set html content of newMsg to ${asString(opts.htmlBody)}
+    ${sendLine}
+end tell`;
 
-    return { success: true, message: "HTML draft created — review in Mail.app" };
-  } finally {
-    try { unlinkSync(emlPath); } catch {}
-  }
+  return new Promise((resolve, reject) => {
+    execFileCb(
+      "/usr/bin/osascript",
+      ["-e", script],
+      { timeout: 30000, maxBuffer: 10 * 1024 * 1024 },
+      (err) => {
+        if (err) reject(new Error(`AppleScript error: ${err.message}`));
+        else resolve({
+          success: true,
+          message: opts.send ? "HTML email sent" : "HTML draft created — review in Mail.app",
+        });
+      }
+    );
+  });
 }
 
 // ─── Write Tools (JXA — requires Mail.app, serialized via queue) ─
@@ -780,10 +740,9 @@ export async function sendEmail(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
-  // Use MIME-based approach for HTML emails (JXA htmlContent is read-only on outgoing)
+  // Use AppleScript for HTML emails (JXA htmlContent is read-only on outgoing)
   if (htmlBody) {
-    const from = await getSenderAddress(account);
-    return sendHtmlViaEml({ from, to, subject, body, htmlBody, cc, bcc, send: true });
+    return sendHtmlViaAppleScript({ to, subject, body, htmlBody, cc, bcc, account, send: true });
   }
 
   const acctSetup = account
@@ -832,10 +791,9 @@ export async function createDraft(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
-  // Use MIME-based approach for HTML drafts
+  // Use AppleScript for HTML drafts (JXA htmlContent is read-only on outgoing)
   if (htmlBody) {
-    const from = await getSenderAddress(account);
-    return sendHtmlViaEml({ from, to, subject, body, htmlBody, cc, send: false });
+    return sendHtmlViaAppleScript({ to, subject, body, htmlBody, cc, account, send: false });
   }
 
   const acctSetup = account
