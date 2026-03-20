@@ -11,7 +11,7 @@
  */
 
 import { readFileSync, statSync, writeFileSync, unlinkSync } from "node:fs";
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -672,7 +672,6 @@ const SMTP_USER = "markdphillips@mac.com";
 
 /** Retrieve the SMTP password from macOS Keychain. */
 function getSmtpPassword(): string {
-  const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
   const result = execFileSync(
     "/usr/bin/security",
     ["find-generic-password", "-s", SMTP_KEYCHAIN_SERVICE, "-a", SMTP_USER, "-w"],
