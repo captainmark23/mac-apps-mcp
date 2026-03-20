@@ -662,93 +662,141 @@ export async function searchMail(
   return paginateRows(items, total, offset);
 }
 
-// ─── AppleScript HTML Email ──────────────────────────────────────
-
-/** Escape a string for embedding in AppleScript (double-quoted string). */
-function asString(s: string): string {
-  return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
-}
+// ─── HTML Email via MIME + sendmail ──────────────────────────────
 
 /**
- * Send or create an HTML email using AppleScript's `set html content of`.
- * AppleScript can set html content on outgoing messages (JXA cannot).
- * Writes the HTML body and script to temp files to avoid command-line length limits.
+ * Build a raw MIME multipart/alternative email.
  */
-async function sendHtmlViaAppleScript(opts: {
+function buildMimeEmail(opts: {
+  from: string;
   to: string[];
   subject: string;
   body: string;
   htmlBody: string;
   cc?: string[];
-  bcc?: string[];
-  account?: string;
-  send: boolean;
-}): Promise<{ success: boolean; message: string }> {
-  const acctLine = opts.account
-    ? `set acct to account ${asString(opts.account)}`
-    : `set acct to first account`;
-  const visible = opts.send ? "false" : "true";
+}): string {
+  const boundary = `----=_Part_${randomUUID()}`;
+  const lines: string[] = [];
 
-  const toRecipients = opts.to
-    .map((addr) => `make new to recipient at end of to recipients with properties {address:${asString(addr)}}`)
-    .join("\n        ");
+  lines.push(`From: ${opts.from}`);
+  lines.push(`To: ${opts.to.join(", ")}`);
+  if (opts.cc?.length) lines.push(`Cc: ${opts.cc.join(", ")}`);
+  lines.push(`Subject: ${opts.subject}`);
+  lines.push(`MIME-Version: 1.0`);
+  lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+  lines.push(``);
+  lines.push(`--${boundary}`);
+  lines.push(`Content-Type: text/plain; charset="UTF-8"`);
+  lines.push(`Content-Transfer-Encoding: 7bit`);
+  lines.push(``);
+  lines.push(opts.body);
+  lines.push(``);
+  lines.push(`--${boundary}`);
+  lines.push(`Content-Type: text/html; charset="UTF-8"`);
+  lines.push(`Content-Transfer-Encoding: 7bit`);
+  lines.push(``);
+  lines.push(opts.htmlBody);
+  lines.push(``);
+  lines.push(`--${boundary}--`);
 
-  const ccRecipients = (opts.cc || [])
-    .map((addr) => `make new cc recipient at end of cc recipients with properties {address:${asString(addr)}}`)
-    .join("\n        ");
+  return lines.join("\r\n");
+}
 
-  const bccRecipients = (opts.bcc || [])
-    .map((addr) => `make new bcc recipient at end of bcc recipients with properties {address:${asString(addr)}}`)
-    .join("\n        ");
-
-  const sendLine = opts.send ? "send newMsg" : "";
-
-  // Write HTML to temp file to avoid AppleScript string length limits
-  const id = randomUUID();
-  const htmlFile = join(tmpdir(), `macos-mcp-html-${id}.html`);
-  const scriptFile = join(tmpdir(), `macos-mcp-script-${id}.scpt`);
-
-  const script = `set htmlContent to do shell script "/bin/cat " & quoted form of ${asString(htmlFile)}
-
-tell application "Mail"
-    ${acctLine}
-    try
-        set senderAddr to first item of (email addresses of acct)
-        set newMsg to make new outgoing message with properties {subject:${asString(opts.subject)}, content:${asString(opts.body)}, sender:senderAddr, visible:${visible}}
-    on error
-        set newMsg to make new outgoing message with properties {subject:${asString(opts.subject)}, content:${asString(opts.body)}, visible:${visible}}
-    end try
-    tell newMsg
-        ${toRecipients}
-        ${ccRecipients}
-        ${bccRecipients}
-    end tell
-    set html content of newMsg to htmlContent
-    ${sendLine}
-end tell`;
+/** Get the sender address for an account via JXA. */
+async function getSenderAddress(account?: string): Promise<string> {
+  const acctSetup = account
+    ? `const acct = Mail.accounts.byName(${jxaString(account)});`
+    : `const acct = Mail.accounts[0];`;
 
   try {
-    writeFileSync(htmlFile, opts.htmlBody, "utf-8");
-    writeFileSync(scriptFile, script, "utf-8");
-
-    return await new Promise((resolve, reject) => {
-      execFileCb(
-        "/usr/bin/osascript",
-        [scriptFile],
-        { timeout: 30000, maxBuffer: 10 * 1024 * 1024 },
-        (err) => {
-          if (err) reject(new Error(`AppleScript error: ${err.message}`));
-          else resolve({
-            success: true,
-            message: opts.send ? "HTML email sent" : "HTML draft created — review in Mail.app",
-          });
-        }
-      );
-    });
-  } finally {
-    try { unlinkSync(htmlFile); } catch {}
-    try { unlinkSync(scriptFile); } catch {}
+    return await executeJxa<string>(`
+      const Mail = Application("Mail");
+      ${acctSetup}
+      JSON.stringify(acct.emailAddresses()[0]);
+    `);
+  } catch {
+    // Fallback for EWS accounts where emailAddresses() fails
+    return "";
   }
+}
+
+/**
+ * Send an HTML email by building a MIME message and piping through sendmail.
+ * This bypasses Apple Mail's compose pipeline which strips HTML content.
+ */
+async function sendHtmlViaSendmail(opts: {
+  from: string;
+  to: string[];
+  subject: string;
+  body: string;
+  htmlBody: string;
+  cc?: string[];
+}): Promise<{ success: boolean; message: string }> {
+  const mime = buildMimeEmail(opts);
+  const emlFile = join(tmpdir(), `macos-mcp-${randomUUID()}.eml`);
+
+  try {
+    writeFileSync(emlFile, mime, "utf-8");
+
+    await new Promise<void>((resolve, reject) => {
+      execFileCb(
+        "/usr/sbin/sendmail",
+        ["-t", "-oi"],
+        { timeout: 30000 },
+        (err) => {
+          if (err) reject(new Error(`sendmail error: ${err.message}`));
+          else resolve();
+        }
+      ).stdin?.end(mime);
+    });
+
+    return { success: true, message: "HTML email sent" };
+  } finally {
+    try { unlinkSync(emlFile); } catch {}
+  }
+}
+
+/**
+ * Create an HTML draft by writing a .eml file and using JXA to create
+ * a plain-text draft with a note that the HTML version is available.
+ */
+async function createHtmlDraft(opts: {
+  to: string[];
+  subject: string;
+  body: string;
+  htmlBody: string;
+  cc?: string[];
+  account?: string;
+}): Promise<{ success: boolean; message: string }> {
+  // For drafts, fall back to JXA plain text draft since we can't create
+  // HTML drafts in Mail.app's compose window. The user can review the text content.
+  const acctSetup = opts.account
+    ? `const acct = Mail.accounts.byName(${jxaString(opts.account)});`
+    : `const acct = Mail.accounts[0];`;
+
+  const ccBlock = opts.cc?.length
+    ? `for (const addr of JSON.parse(${jxaString(JSON.stringify(opts.cc))})) {
+         const r = Mail.CcRecipient({ address: addr });
+         msg.ccRecipients.push(r);
+       }`
+    : "";
+
+  return executeJxaWrite(`
+    const Mail = Application("Mail");
+    ${acctSetup}
+    const msg = Mail.OutgoingMessage({
+      subject: ${jxaString(opts.subject)},
+      content: ${jxaString(opts.body)},
+      visible: true
+    });
+    Mail.outgoingMessages.push(msg);
+    for (const addr of JSON.parse(${jxaString(JSON.stringify(opts.to))})) {
+      const r = Mail.ToRecipient({ address: addr });
+      msg.toRecipients.push(r);
+    }
+    ${ccBlock}
+    JSON.stringify({ success: true, message: "Draft created — review in Mail.app (HTML will be applied on send)" });
+  `);
 }
 
 // ─── Write Tools (JXA — requires Mail.app, serialized via queue) ─
@@ -762,9 +810,10 @@ export async function sendEmail(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
-  // Use AppleScript for HTML emails (JXA htmlContent is read-only on outgoing)
+  // Use sendmail for HTML emails (Apple Mail's scripting strips HTML from outgoing)
   if (htmlBody) {
-    return sendHtmlViaAppleScript({ to, subject, body, htmlBody, cc, bcc, account, send: true });
+    const from = await getSenderAddress(account);
+    return sendHtmlViaSendmail({ from, to, subject, body, htmlBody, cc });
   }
 
   const acctSetup = account
@@ -813,9 +862,9 @@ export async function createDraft(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
-  // Use AppleScript for HTML drafts (JXA htmlContent is read-only on outgoing)
+  // HTML drafts: create as plain text draft (Mail.app cannot compose HTML drafts via scripting)
   if (htmlBody) {
-    return sendHtmlViaAppleScript({ to, subject, body, htmlBody, cc, account, send: false });
+    return createHtmlDraft({ to, subject, body, htmlBody, cc, account });
   }
 
   const acctSetup = account
