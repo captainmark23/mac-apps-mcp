@@ -10,7 +10,11 @@
  * move_message, flag_message, mark_read
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import { execFile as execFileCb } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /** Maximum .emlx file size to read (50 MB). Larger files are skipped to prevent OOM. */
 const MAX_EMLX_SIZE = 50 * 1024 * 1024;
@@ -658,6 +662,113 @@ export async function searchMail(
   return paginateRows(items, total, offset);
 }
 
+// ─── MIME Email Builder ──────────────────────────────────────────
+
+/** Build a raw MIME multipart/alternative email with text/plain and text/html parts. */
+function buildMimeEmail(opts: {
+  from: string;
+  to: string[];
+  subject: string;
+  body: string;
+  htmlBody: string;
+  cc?: string[];
+  bcc?: string[];
+}): string {
+  const boundary = `----=_Part_${randomUUID()}`;
+  const lines: string[] = [];
+
+  lines.push(`From: ${opts.from}`);
+  lines.push(`To: ${opts.to.join(", ")}`);
+  if (opts.cc?.length) lines.push(`Cc: ${opts.cc.join(", ")}`);
+  if (opts.bcc?.length) lines.push(`Bcc: ${opts.bcc.join(", ")}`);
+  lines.push(`Subject: ${opts.subject}`);
+  lines.push(`MIME-Version: 1.0`);
+  lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+  lines.push(``);
+  lines.push(`--${boundary}`);
+  lines.push(`Content-Type: text/plain; charset="UTF-8"`);
+  lines.push(`Content-Transfer-Encoding: 7bit`);
+  lines.push(``);
+  lines.push(opts.body);
+  lines.push(``);
+  lines.push(`--${boundary}`);
+  lines.push(`Content-Type: text/html; charset="UTF-8"`);
+  lines.push(`Content-Transfer-Encoding: 7bit`);
+  lines.push(``);
+  lines.push(opts.htmlBody);
+  lines.push(``);
+  lines.push(`--${boundary}--`);
+
+  return lines.join("\r\n");
+}
+
+/** Get the sender address for an account via JXA. */
+async function getSenderAddress(account?: string): Promise<string> {
+  const acctSetup = account
+    ? `const acct = Mail.accounts.byName(${jxaString(account)});`
+    : `const acct = Mail.accounts[0];`;
+
+  return executeJxa<string>(`
+    const Mail = Application("Mail");
+    ${acctSetup}
+    JSON.stringify(acct.emailAddresses()[0]);
+  `);
+}
+
+/**
+ * Send an HTML email by writing a .eml file and opening it with Mail.app,
+ * then using JXA to send the resulting outgoing message.
+ */
+async function sendHtmlViaEml(opts: {
+  from: string;
+  to: string[];
+  subject: string;
+  body: string;
+  htmlBody: string;
+  cc?: string[];
+  bcc?: string[];
+  send: boolean;
+}): Promise<{ success: boolean; message: string }> {
+  const mime = buildMimeEmail(opts);
+  const emlPath = join(tmpdir(), `macos-mcp-${randomUUID()}.eml`);
+
+  try {
+    writeFileSync(emlPath, mime);
+
+    // Open the .eml file with Mail.app — creates a compose window
+    await new Promise<void>((resolve, reject) => {
+      execFileCb("/usr/bin/open", ["-a", "Mail", emlPath], { timeout: 10000 }, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    if (opts.send) {
+      // Wait for Mail to process the file and create the outgoing message
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // Find and send the outgoing message matching our subject
+      await executeJxaWrite(`
+        const Mail = Application("Mail");
+        const msgs = Mail.outgoingMessages();
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].subject() === ${jxaString(opts.subject)}) {
+            msgs[i].send();
+            break;
+          }
+        }
+        JSON.stringify({ success: true, message: "HTML email sent" });
+      `);
+
+      return { success: true, message: "HTML email sent" };
+    }
+
+    return { success: true, message: "HTML draft created — review in Mail.app" };
+  } finally {
+    try { unlinkSync(emlPath); } catch {}
+  }
+}
+
 // ─── Write Tools (JXA — requires Mail.app, serialized via queue) ─
 
 export async function sendEmail(
@@ -669,6 +780,12 @@ export async function sendEmail(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
+  // Use MIME-based approach for HTML emails (JXA htmlContent is read-only on outgoing)
+  if (htmlBody) {
+    const from = await getSenderAddress(account);
+    return sendHtmlViaEml({ from, to, subject, body, htmlBody, cc, bcc, send: true });
+  }
+
   const acctSetup = account
     ? `const acct = Mail.accounts.byName(${jxaString(account)});`
     : `const acct = Mail.accounts[0];`;
@@ -687,10 +804,6 @@ export async function sendEmail(
        }`
     : "";
 
-  const htmlBlock = htmlBody
-    ? `msg.htmlContent = ${jxaString(htmlBody)};`
-    : "";
-
   return executeJxaWrite(`
     const Mail = Application("Mail");
     ${acctSetup}
@@ -700,7 +813,6 @@ export async function sendEmail(
       sender: acct.emailAddresses()[0]
     });
     Mail.outgoingMessages.push(msg);
-    ${htmlBlock}
     for (const addr of JSON.parse(${jxaString(JSON.stringify(to))})) {
       const r = Mail.ToRecipient({ address: addr });
       msg.toRecipients.push(r);
@@ -720,6 +832,12 @@ export async function createDraft(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
+  // Use MIME-based approach for HTML drafts
+  if (htmlBody) {
+    const from = await getSenderAddress(account);
+    return sendHtmlViaEml({ from, to, subject, body, htmlBody, cc, send: false });
+  }
+
   const acctSetup = account
     ? `const acct = Mail.accounts.byName(${jxaString(account)});`
     : `const acct = Mail.accounts[0];`;
@@ -729,10 +847,6 @@ export async function createDraft(
          const r = Mail.CcRecipient({ address: addr });
          msg.ccRecipients.push(r);
        }`
-    : "";
-
-  const htmlBlock = htmlBody
-    ? `msg.htmlContent = ${jxaString(htmlBody)};`
     : "";
 
   return executeJxaWrite(`
@@ -745,7 +859,6 @@ export async function createDraft(
       visible: true
     });
     Mail.outgoingMessages.push(msg);
-    ${htmlBlock}
     for (const addr of JSON.parse(${jxaString(JSON.stringify(to))})) {
       const r = Mail.ToRecipient({ address: addr });
       msg.toRecipients.push(r);
@@ -772,9 +885,9 @@ export async function replyTo(
 
   const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
 
-  const replyHtmlBlock = htmlBody
-    ? `reply.htmlContent = ${jxaString(htmlBody)};`
-    : "";
+  // Note: htmlBody is accepted but ignored for replies — JXA htmlContent is read-only
+  // on outgoing messages. Replies use plain text body. HTML replies would need MIME approach
+  // with thread context, which is not yet implemented.
 
   return executeJxaWrite(`
     const Mail = Application("Mail");
@@ -787,7 +900,6 @@ export async function replyTo(
     const reply = msg.reply({ replyToAll: ${Boolean(replyAll)}, openingWindow: ${!Boolean(send)} });
     if (reply) {
       reply.content = ${jxaString(body)} + "\\n\\n" + reply.content();
-      ${replyHtmlBlock}
       ${send ? "reply.send();" : ""}
     }
     JSON.stringify({
@@ -814,11 +926,9 @@ export async function forwardMessage(
 
   const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
 
+  // Note: htmlBody is accepted but ignored for forwards — JXA htmlContent is read-only
   const fwdContentBlock = body
     ? `fwd.content = ${jxaString(body)} + "\\n\\n" + fwd.content();`
-    : "";
-  const fwdHtmlBlock = htmlBody
-    ? `fwd.htmlContent = ${jxaString(htmlBody)};`
     : "";
 
   return executeJxaWrite(`
@@ -836,7 +946,6 @@ export async function forwardMessage(
         fwd.toRecipients.push(r);
       }
       ${fwdContentBlock}
-      ${fwdHtmlBlock}
       ${send ? "fwd.send();" : ""}
     }
     JSON.stringify({
