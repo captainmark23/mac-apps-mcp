@@ -662,141 +662,92 @@ export async function searchMail(
   return paginateRows(items, total, offset);
 }
 
-// ─── HTML Email via MIME + sendmail ──────────────────────────────
+// ─── HTML Email via iCloud SMTP ──────────────────────────────────
+
+/** Keychain service name for the iCloud SMTP app-specific password. */
+const SMTP_KEYCHAIN_SERVICE = "macos-mcp-smtp";
+const SMTP_HOST = "smtp.mail.me.com";
+const SMTP_PORT = 587;
+const SMTP_USER = "markdphillips@mac.com";
+
+/** Retrieve the SMTP password from macOS Keychain. */
+function getSmtpPassword(): string {
+  const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+  const result = execFileSync(
+    "/usr/bin/security",
+    ["find-generic-password", "-s", SMTP_KEYCHAIN_SERVICE, "-a", SMTP_USER, "-w"],
+    { timeout: 5000 }
+  );
+  return result.toString().trim();
+}
 
 /**
- * Build a raw MIME multipart/alternative email.
+ * Send an HTML email via iCloud SMTP using Python3's smtplib.
+ * Reads SMTP credentials from macOS Keychain. Constructs a proper
+ * multipart/alternative MIME message with text/plain and text/html.
  */
-function buildMimeEmail(opts: {
-  from: string;
+async function sendHtmlViaSmtp(opts: {
   to: string[];
   subject: string;
   body: string;
   htmlBody: string;
   cc?: string[];
-}): string {
-  const boundary = `----=_Part_${randomUUID()}`;
-  const lines: string[] = [];
-
-  lines.push(`From: ${opts.from}`);
-  lines.push(`To: ${opts.to.join(", ")}`);
-  if (opts.cc?.length) lines.push(`Cc: ${opts.cc.join(", ")}`);
-  lines.push(`Subject: ${opts.subject}`);
-  lines.push(`MIME-Version: 1.0`);
-  lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
-  lines.push(``);
-  lines.push(`--${boundary}`);
-  lines.push(`Content-Type: text/plain; charset="UTF-8"`);
-  lines.push(`Content-Transfer-Encoding: 7bit`);
-  lines.push(``);
-  lines.push(opts.body);
-  lines.push(``);
-  lines.push(`--${boundary}`);
-  lines.push(`Content-Type: text/html; charset="UTF-8"`);
-  lines.push(`Content-Transfer-Encoding: 7bit`);
-  lines.push(``);
-  lines.push(opts.htmlBody);
-  lines.push(``);
-  lines.push(`--${boundary}--`);
-
-  return lines.join("\r\n");
-}
-
-/** Get the sender address for an account via JXA. */
-async function getSenderAddress(account?: string): Promise<string> {
-  const acctSetup = account
-    ? `const acct = Mail.accounts.byName(${jxaString(account)});`
-    : `const acct = Mail.accounts[0];`;
-
-  try {
-    return await executeJxa<string>(`
-      const Mail = Application("Mail");
-      ${acctSetup}
-      JSON.stringify(acct.emailAddresses()[0]);
-    `);
-  } catch {
-    // Fallback for EWS accounts where emailAddresses() fails
-    return "";
-  }
-}
-
-/**
- * Send an HTML email by building a MIME message and piping through sendmail.
- * This bypasses Apple Mail's compose pipeline which strips HTML content.
- */
-async function sendHtmlViaSendmail(opts: {
-  from: string;
-  to: string[];
-  subject: string;
-  body: string;
-  htmlBody: string;
-  cc?: string[];
+  bcc?: string[];
 }): Promise<{ success: boolean; message: string }> {
-  const mime = buildMimeEmail(opts);
-  const emlFile = join(tmpdir(), `macos-mcp-${randomUUID()}.eml`);
+  const password = getSmtpPassword();
+
+  // Write HTML and plain text to temp files to avoid shell escaping issues
+  const id = randomUUID();
+  const htmlFile = join(tmpdir(), `macos-mcp-html-${id}.html`);
+  const textFile = join(tmpdir(), `macos-mcp-text-${id}.txt`);
 
   try {
-    writeFileSync(emlFile, mime, "utf-8");
+    writeFileSync(htmlFile, opts.htmlBody, "utf-8");
+    writeFileSync(textFile, opts.body, "utf-8");
+
+    const allRecipients = [...opts.to, ...(opts.cc || []), ...(opts.bcc || [])];
+
+    const pyScript = `
+import smtplib, json, sys
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+with open(${JSON.stringify(textFile)}, 'r') as f:
+    plain = f.read()
+with open(${JSON.stringify(htmlFile)}, 'r') as f:
+    html = f.read()
+
+msg = MIMEMultipart('alternative')
+msg['From'] = ${JSON.stringify(SMTP_USER)}
+msg['To'] = ${JSON.stringify(opts.to.join(", "))}
+${opts.cc?.length ? `msg['Cc'] = ${JSON.stringify(opts.cc.join(", "))}` : ""}
+msg['Subject'] = ${JSON.stringify(opts.subject)}
+msg.attach(MIMEText(plain, 'plain', 'utf-8'))
+msg.attach(MIMEText(html, 'html', 'utf-8'))
+
+with smtplib.SMTP(${JSON.stringify(SMTP_HOST)}, ${SMTP_PORT}) as s:
+    s.starttls()
+    s.login(${JSON.stringify(SMTP_USER)}, ${JSON.stringify(password)})
+    s.sendmail(${JSON.stringify(SMTP_USER)}, ${JSON.stringify(allRecipients)}, msg.as_string())
+`;
 
     await new Promise<void>((resolve, reject) => {
       execFileCb(
-        "/usr/sbin/sendmail",
-        ["-t", "-oi"],
+        "/usr/bin/python3",
+        ["-c", pyScript],
         { timeout: 30000 },
-        (err) => {
-          if (err) reject(new Error(`sendmail error: ${err.message}`));
+        (err, _stdout, stderr) => {
+          if (err) reject(new Error(`SMTP send failed: ${stderr?.toString().trim() || err.message}`));
           else resolve();
         }
-      ).stdin?.end(mime);
+      );
     });
 
     return { success: true, message: "HTML email sent" };
   } finally {
-    try { unlinkSync(emlFile); } catch {}
+    try { unlinkSync(htmlFile); } catch {}
+    try { unlinkSync(textFile); } catch {}
   }
-}
-
-/**
- * Create an HTML draft by writing a .eml file and using JXA to create
- * a plain-text draft with a note that the HTML version is available.
- */
-async function createHtmlDraft(opts: {
-  to: string[];
-  subject: string;
-  body: string;
-  htmlBody: string;
-  cc?: string[];
-  account?: string;
-}): Promise<{ success: boolean; message: string }> {
-  // For drafts, fall back to JXA plain text draft since we can't create
-  // HTML drafts in Mail.app's compose window. The user can review the text content.
-  const acctSetup = opts.account
-    ? `const acct = Mail.accounts.byName(${jxaString(opts.account)});`
-    : `const acct = Mail.accounts[0];`;
-
-  const ccBlock = opts.cc?.length
-    ? `for (const addr of JSON.parse(${jxaString(JSON.stringify(opts.cc))})) {
-         const r = Mail.CcRecipient({ address: addr });
-         msg.ccRecipients.push(r);
-       }`
-    : "";
-
-  return executeJxaWrite(`
-    const Mail = Application("Mail");
-    ${acctSetup}
-    const msg = Mail.OutgoingMessage({
-      subject: ${jxaString(opts.subject)},
-      content: ${jxaString(opts.body)},
-      visible: true
-    });
-    Mail.outgoingMessages.push(msg);
-    for (const addr of JSON.parse(${jxaString(JSON.stringify(opts.to))})) {
-      const r = Mail.ToRecipient({ address: addr });
-      msg.toRecipients.push(r);
-    }
-    ${ccBlock}
-    JSON.stringify({ success: true, message: "Draft created — review in Mail.app (HTML will be applied on send)" });
-  `);
 }
 
 // ─── Write Tools (JXA — requires Mail.app, serialized via queue) ─
@@ -810,10 +761,9 @@ export async function sendEmail(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
-  // Use sendmail for HTML emails (Apple Mail's scripting strips HTML from outgoing)
+  // Use iCloud SMTP for HTML emails (Apple Mail's scripting strips HTML from outgoing)
   if (htmlBody) {
-    const from = await getSenderAddress(account);
-    return sendHtmlViaSendmail({ from, to, subject, body, htmlBody, cc });
+    return sendHtmlViaSmtp({ to, subject, body, htmlBody, cc, bcc });
   }
 
   const acctSetup = account
@@ -862,9 +812,9 @@ export async function createDraft(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
-  // HTML drafts: create as plain text draft (Mail.app cannot compose HTML drafts via scripting)
+  // Use iCloud SMTP for HTML drafts — sends immediately since Mail.app can't compose HTML drafts
   if (htmlBody) {
-    return createHtmlDraft({ to, subject, body, htmlBody, cc, account });
+    return sendHtmlViaSmtp({ to, subject, body, htmlBody, cc });
   }
 
   const acctSetup = account
