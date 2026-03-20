@@ -708,9 +708,7 @@ async function sendHtmlViaAppleScript(opts: {
   const htmlFile = join(tmpdir(), `macos-mcp-html-${id}.html`);
   const scriptFile = join(tmpdir(), `macos-mcp-script-${id}.scpt`);
 
-  const script = `
-set htmlFile to POSIX file ${asString(htmlFile)}
-set htmlContent to read htmlFile as «class utf8»
+  const script = `set htmlContent to do shell script "/bin/cat " & quoted form of ${asString(htmlFile)}
 
 tell application "Mail"
     ${acctLine}
