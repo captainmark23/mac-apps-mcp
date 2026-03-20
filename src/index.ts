@@ -378,49 +378,52 @@ server.registerTool("mail_search", {
 
 server.registerTool("mail_send", {
   title: "Send Email",
-  description: "Send an email. For important emails, prefer mail_create_draft so the user can review first. Use when: sending a quick reply, automated email dispatch",
+  description: "Send an email. Supports HTML formatting via htmlBody for rich text (bold, italic, links, tables, etc). For important emails, prefer mail_create_draft so the user can review first. Use when: sending a quick reply, automated email dispatch",
   inputSchema: z.object({
     to: z.array(z.string().email("Invalid email address")).min(1, "At least one recipient required").describe("Recipient email addresses"),
     subject: z.string().max(1000, "Query too long").describe("Email subject"),
-    body: z.string().max(100000).describe("Email body text"),
+    body: z.string().max(100000).describe("Plain text body (also used as fallback for email clients that don't support HTML)"),
+    htmlBody: z.string().max(200000).optional().describe("HTML body for rich text formatting. When provided, the email is sent as HTML with the plain text body as fallback."),
     cc: z.array(z.string().email("Invalid email address")).optional().describe("CC addresses"),
     bcc: z.array(z.string().email("Invalid email address")).optional().describe("BCC addresses"),
     account: z.string().max(200, "Name too long").optional(),
   }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-}, async ({ to, subject, body, cc, bcc, account }) => {
+}, async ({ to, subject, body, htmlBody, cc, bcc, account }) => {
   try {
-    const result = await mail.sendEmail(to, subject, body, cc, bcc, account);
+    const result = await mail.sendEmail(to, subject, body, cc, bcc, account, htmlBody);
     return ok(result, false);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_create_draft", {
   title: "Create Email Draft",
-  description: "Create a draft email for user review in Mail.app. Preferred for important emails. Use when: composing an important email that needs review, preparing a message for later",
+  description: "Create a draft email for user review in Mail.app. Supports HTML formatting via htmlBody for rich text. Preferred for important emails. Use when: composing an important email that needs review, preparing a message for later",
   inputSchema: z.object({
     to: z.array(z.string().email("Invalid email address")).min(1, "At least one recipient required").describe("Recipient email addresses"),
     subject: z.string().max(1000, "Query too long"),
-    body: z.string().max(100000),
+    body: z.string().max(100000).describe("Plain text body (also used as fallback for email clients that don't support HTML)"),
+    htmlBody: z.string().max(200000).optional().describe("HTML body for rich text formatting. When provided, the draft uses HTML with the plain text body as fallback."),
     cc: z.array(z.string().email("Invalid email address")).optional(),
     account: z.string().max(200, "Name too long").optional(),
   }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-}, async ({ to, subject, body, cc, account }) => {
+}, async ({ to, subject, body, htmlBody, cc, account }) => {
   try {
-    const result = await mail.createDraft(to, subject, body, cc, account);
+    const result = await mail.createDraft(to, subject, body, cc, account, htmlBody);
     return ok(result, false);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_reply", {
   title: "Reply to Email",
-  description: "Reply to an email. Set send=false to save as draft for review. Use when: responding to a conversation, following up on a thread",
+  description: "Reply to an email. Supports HTML formatting via htmlBody for rich text replies. Set send=false to save as draft for review. Use when: responding to a conversation, following up on a thread",
   inputSchema: z.object({
     messageId: z.number().describe("Email ID to reply to"),
-    body: z.string().max(100000).describe("Reply body"),
+    body: z.string().max(100000).describe("Plain text reply body"),
+    htmlBody: z.string().max(200000).optional().describe("HTML reply body for rich text formatting. When provided, the reply uses HTML."),
     replyAll: z.boolean().default(false),
     send: z.boolean().default(true).describe("Send immediately or save as draft"),
     mailbox: z.string().max(200, "Name too long").optional().describe("Mailbox name. If omitted, auto-resolved from the message ID."),
@@ -428,29 +431,30 @@ server.registerTool("mail_reply", {
   }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-}, async ({ messageId, body, replyAll, send, mailbox, account }) => {
+}, async ({ messageId, body, htmlBody, replyAll, send, mailbox, account }) => {
   try {
-    const result = await mail.replyTo(messageId, body, replyAll, send, mailbox, account);
+    const result = await mail.replyTo(messageId, body, replyAll, send, mailbox, account, htmlBody);
     return ok(result, false);
   } catch (e) { return err(e); }
 });
 
 server.registerTool("mail_forward", {
   title: "Forward Email",
-  description: "Forward an email. Set send=false to save as draft for review. Mailbox and account are auto-resolved from the message ID if not provided. Use when: sharing an email with someone else, delegating a message",
+  description: "Forward an email. Supports HTML formatting via htmlBody for rich text. Set send=false to save as draft for review. Mailbox and account are auto-resolved from the message ID if not provided. Use when: sharing an email with someone else, delegating a message",
   inputSchema: z.object({
     messageId: z.number().describe("Email ID to forward"),
     to: z.array(z.string().email("Invalid email address")).min(1, "At least one recipient required").describe("Forward to these addresses"),
-    body: z.string().max(100000).optional().describe("Message to prepend"),
+    body: z.string().max(100000).optional().describe("Plain text message to prepend"),
+    htmlBody: z.string().max(200000).optional().describe("HTML message to prepend for rich text formatting."),
     send: z.boolean().default(true),
     mailbox: z.string().max(200, "Name too long").optional().describe("Mailbox name. If omitted, auto-resolved from the message ID."),
     account: z.string().max(200, "Name too long").optional().describe("Account name. If omitted, auto-resolved from the message ID."),
   }).strict(),
   outputSchema: SuccessMessageZ,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-}, async ({ messageId, to, body, send, mailbox, account }) => {
+}, async ({ messageId, to, body, send, mailbox, account, htmlBody }) => {
   try {
-    const result = await mail.forwardMessage(messageId, to, body, send, mailbox, account);
+    const result = await mail.forwardMessage(messageId, to, body, send, mailbox, account, htmlBody);
     return ok(result, false);
   } catch (e) { return err(e); }
 });

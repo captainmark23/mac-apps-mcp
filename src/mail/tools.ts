@@ -666,7 +666,8 @@ export async function sendEmail(
   body: string,
   cc?: string[],
   bcc?: string[],
-  account?: string
+  account?: string,
+  htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
   const acctSetup = account
     ? `const acct = Mail.accounts.byName(${jxaString(account)});`
@@ -686,6 +687,10 @@ export async function sendEmail(
        }`
     : "";
 
+  const htmlBlock = htmlBody
+    ? `msg.htmlContent = ${jxaString(htmlBody)};`
+    : "";
+
   return executeJxaWrite(`
     const Mail = Application("Mail");
     ${acctSetup}
@@ -695,6 +700,7 @@ export async function sendEmail(
       sender: acct.emailAddresses()[0]
     });
     Mail.outgoingMessages.push(msg);
+    ${htmlBlock}
     for (const addr of JSON.parse(${jxaString(JSON.stringify(to))})) {
       const r = Mail.ToRecipient({ address: addr });
       msg.toRecipients.push(r);
@@ -711,7 +717,8 @@ export async function createDraft(
   subject: string,
   body: string,
   cc?: string[],
-  account?: string
+  account?: string,
+  htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
   const acctSetup = account
     ? `const acct = Mail.accounts.byName(${jxaString(account)});`
@@ -724,6 +731,10 @@ export async function createDraft(
        }`
     : "";
 
+  const htmlBlock = htmlBody
+    ? `msg.htmlContent = ${jxaString(htmlBody)};`
+    : "";
+
   return executeJxaWrite(`
     const Mail = Application("Mail");
     ${acctSetup}
@@ -734,6 +745,7 @@ export async function createDraft(
       visible: true
     });
     Mail.outgoingMessages.push(msg);
+    ${htmlBlock}
     for (const addr of JSON.parse(${jxaString(JSON.stringify(to))})) {
       const r = Mail.ToRecipient({ address: addr });
       msg.toRecipients.push(r);
@@ -749,7 +761,8 @@ export async function replyTo(
   replyAll = false,
   send = true,
   mailbox?: string,
-  account?: string
+  account?: string,
+  htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
   if (!mailbox || !account) {
     const loc = await resolveMessageLocation(messageId);
@@ -758,6 +771,10 @@ export async function replyTo(
   }
 
   const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
+
+  const htmlBlock = htmlBody
+    ? `reply.htmlContent = ${jxaString(htmlBody)};`
+    : "";
 
   return executeJxaWrite(`
     const Mail = Application("Mail");
@@ -770,6 +787,7 @@ export async function replyTo(
     const reply = msg.reply({ replyToAll: ${Boolean(replyAll)}, openingWindow: ${!Boolean(send)} });
     if (reply) {
       reply.content = ${jxaString(body)} + "\\n\\n" + reply.content();
+      ${htmlBlock}
       ${send ? "reply.send();" : ""}
     }
     JSON.stringify({
@@ -785,7 +803,8 @@ export async function forwardMessage(
   body?: string,
   send = true,
   mailbox?: string,
-  account?: string
+  account?: string,
+  htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
   if (!mailbox || !account) {
     const loc = await resolveMessageLocation(messageId);
@@ -794,6 +813,10 @@ export async function forwardMessage(
   }
 
   const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
+
+  const htmlBlock = htmlBody
+    ? `fwd.htmlContent = ${jxaString(htmlBody)};`
+    : "";
 
   return executeJxaWrite(`
     const Mail = Application("Mail");
@@ -810,6 +833,7 @@ export async function forwardMessage(
         fwd.toRecipients.push(r);
       }
       ${body ? `fwd.content = ${jxaString(body)} + "\\n\\n" + fwd.content();` : ""}
+      ${htmlBlock}
       ${send ? "fwd.send();" : ""}
     }
     JSON.stringify({
