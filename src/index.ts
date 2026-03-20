@@ -211,6 +211,7 @@ const EmailFullZ = z.object({
   cc: z.array(z.string()),
   mailbox: z.string(),
   account: z.string(),
+  preview: z.string(),
   attachments: z.array(AttachmentMetaZ).describe("Attachment metadata (filename, type, size). Content not included — metadata only."),
 });
 
