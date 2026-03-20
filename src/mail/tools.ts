@@ -702,8 +702,12 @@ async function sendHtmlViaAppleScript(opts: {
   const script = `
 tell application "Mail"
     ${acctLine}
-    set senderAddr to first item of (email addresses of acct)
-    set newMsg to make new outgoing message with properties {subject:${asString(opts.subject)}, content:${asString(opts.body)}, sender:senderAddr, visible:${visible}}
+    try
+        set senderAddr to first item of (email addresses of acct)
+        set newMsg to make new outgoing message with properties {subject:${asString(opts.subject)}, content:${asString(opts.body)}, sender:senderAddr, visible:${visible}}
+    on error
+        set newMsg to make new outgoing message with properties {subject:${asString(opts.subject)}, content:${asString(opts.body)}, visible:${visible}}
+    end try
     tell newMsg
         ${toRecipients}
         ${ccRecipients}
