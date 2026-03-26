@@ -45,7 +45,7 @@ function findContactsDb(): string {
     const srcDir = join(sourcesDir, src);
     try {
       if (!statSync(srcDir).isDirectory()) continue;
-    } catch { continue; }
+    } catch { /* skip non-statable entries */ continue; }
 
     // Search for AddressBook-v*.abcddb (version may change with macOS updates)
     try {
@@ -58,10 +58,12 @@ function findContactsDb(): string {
               bestSize = size;
               bestPath = dbPath;
             }
-          } catch { /* skip inaccessible */ }
+          } catch { /* skip inaccessible db files */ }
         }
       }
-    } catch { /* skip unreadable dirs */ }
+    } catch (e) {
+      process.stderr.write(`[contacts] Skipping unreadable source dir ${src}: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
   }
 
   if (!bestPath) {
@@ -75,8 +77,14 @@ function findContactsDb(): string {
 }
 
 let _contactsDb: string | null = null;
+let _contactsDbExpiry = 0;
+const DB_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
 function getContactsDb(): string {
-  if (!_contactsDb) _contactsDb = findContactsDb();
+  if (!_contactsDb || Date.now() > _contactsDbExpiry) {
+    _contactsDb = findContactsDb();
+    _contactsDbExpiry = Date.now() + DB_CACHE_TTL_MS;
+  }
   return _contactsDb;
 }
 

@@ -8,6 +8,12 @@
  */
 export const CORE_DATA_EPOCH_OFFSET = 978307200;
 
+/** Seconds in one day. Used for date-range queries and day boundary calculations. */
+export const SECONDS_PER_DAY = 86400;
+
+/** Maximum .emlx file size to read (50 MB). Larger files are skipped to prevent OOM. */
+export const MAX_EMLX_SIZE = 50 * 1024 * 1024;
+
 /**
  * Convert a Core Data timestamp to ISO 8601 string.
  * Handles null, empty, NaN, and both number/string inputs.
@@ -28,6 +34,8 @@ export function sanitizeErrorMessage(msg: string): string {
     .replace(/\/Users\/[^\s:'"]+/g, "[path]")
     .replace(/\/private\/[^\s:'"]+/g, "[path]")
     .replace(/\/Library\/[^\s:'"]+/g, "[path]")
+    .replace(/\/System\/[^\s:'"]+/g, "[path]")
+    .replace(/\/Applications\/[^\s:'"]+/g, "[path]")
     .replace(/\/var\/[^\s:'"]+/g, "[path]")
     .replace(/\/tmp\/[^\s:'"]+/g, "[path]");
 }

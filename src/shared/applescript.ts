@@ -54,15 +54,19 @@ export async function executeJxa<T = unknown>(
 
         const raw = stdout.trim();
         if (!raw) {
-          resolve(undefined as T);
+          // All JXA scripts should produce output via JSON.stringify().
+          // Empty output likely means the script failed silently.
+          reject(new Error("Script produced no output. Verify the JXA script returns a value."));
           return;
         }
 
         try {
           resolve(JSON.parse(raw) as T);
         } catch {
-          // Some scripts return plain text
-          resolve(raw as T);
+          // Non-JSON output — safe only when T is string-compatible.
+          // Log a warning since all scripts should return JSON.
+          process.stderr.write(`[jxa] Warning: script returned non-JSON output (${raw.length} chars)\n`);
+          resolve(raw as unknown as T);
         }
       }
     );
