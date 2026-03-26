@@ -37,9 +37,11 @@ describe("toCoreDataTimestamp", () => {
     assert.equal(result, expected);
   });
 
-  it("returns NaN-derived value for invalid date", () => {
-    const result = toCoreDataTimestamp("not-a-date");
-    assert.ok(isNaN(result));
+  it("throws for invalid date string", () => {
+    assert.throws(
+      () => toCoreDataTimestamp("not-a-date"),
+      { message: /Invalid date string/ }
+    );
   });
 });
 

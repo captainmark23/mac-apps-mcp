@@ -14,10 +14,7 @@ import { join } from "node:path";
 import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
 import { sqliteQuery, sqlEscape, safeInt } from "../shared/sqlite.js";
 import { getCalendarNames } from "../shared/config.js";
-import { PaginatedResult, paginateArray, CORE_DATA_EPOCH_OFFSET, fromCoreDataTimestamp } from "../shared/types.js";
-
-/** Seconds in one day. Used for date-range queries and day boundary calculations. */
-const SECONDS_PER_DAY = 86400;
+import { PaginatedResult, paginateArray, CORE_DATA_EPOCH_OFFSET, SECONDS_PER_DAY, fromCoreDataTimestamp } from "../shared/types.js";
 
 /** Milliseconds in one day. Used for date arithmetic. */
 const MS_PER_DAY = 86_400_000;
@@ -100,9 +97,13 @@ function calendarWhereClause(calendar?: string): string {
   return "";
 }
 
-/** Convert a JS Date or ISO string to Core Data timestamp. */
+/** Convert a JS Date or ISO string to Core Data timestamp. Throws on invalid dates. */
 export function toCoreDataTimestamp(dateStr: string): number {
-  return Math.floor(new Date(dateStr).getTime() / 1000) - CORE_DATA_EPOCH_OFFSET;
+  const ms = new Date(dateStr).getTime();
+  if (isNaN(ms)) {
+    throw new Error(`Invalid date string: "${dateStr}". Use ISO 8601 format (e.g., '2024-01-15').`);
+  }
+  return Math.floor(ms / 1000) - CORE_DATA_EPOCH_OFFSET;
 }
 
 /** Map numeric status to human-readable string. */
@@ -206,7 +207,7 @@ export async function getEventsToday(
   return getEvents(startOfDay.toISOString(), endOfDay.toISOString(), calendar, limit, offset);
 }
 
-export async function getEventsThisWeek(
+export async function getEventsNext7Days(
   calendar?: string,
   limit = 200,
   offset = 0

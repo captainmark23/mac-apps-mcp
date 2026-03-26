@@ -16,17 +16,15 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, readdirSync, statSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { execFile as execFileCb } from "node:child_process";
-import { sqliteQuery, sqlLikeEscape, safeInt } from "../shared/sqlite.js";
-import { getMailDbPath, getMailDir, resolveMailAccountUuid, getDefaultMailAccount } from "../shared/config.js";
-import { PaginatedResult, paginateRows } from "../shared/types.js";
+import { sqliteQuery, safeInt } from "../shared/sqlite.js";
+import { getMailDbPath, getMailDir, mailboxUrlFilter } from "../shared/config.js";
+import { PaginatedResult, paginateRows, MAX_EMLX_SIZE } from "../shared/types.js";
 
 const FTS_DIR = join(homedir(), ".macos-mcp");
 const FTS_DB = join(FTS_DIR, "mail-fts.db");
 const SQLITE3 = "/usr/bin/sqlite3";
-
-/** Maximum .emlx file size to read (50 MB). Larger files are skipped to prevent OOM. */
-const MAX_EMLX_SIZE = 50 * 1024 * 1024;
 
 /** Maximum characters to index per email body. Keeps DB manageable while providing good search coverage. */
 const MAX_FTS_BODY_CHARS = 10_000;
@@ -97,9 +95,10 @@ export function mailboxUrlToDir(url: string): string | null {
 export function findDataDir(mboxDir: string): string | null {
   if (!existsSync(mboxDir)) return null;
   const entries = readdirSync(mboxDir);
-  // Look for UUID-like directory (contains hyphens, 36 chars)
+  // Look for UUID directory (standard 8-4-4-4-12 hex format)
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const uuid = entries.find(
-    (e) => e.length === 36 && e.includes("-") && statSync(join(mboxDir, e)).isDirectory()
+    (e) => UUID_RE.test(e) && statSync(join(mboxDir, e)).isDirectory()
   );
   if (!uuid) return null;
   return join(mboxDir, uuid, "Data");
@@ -120,7 +119,7 @@ export function resolveEmlxPath(rowid: number, mailboxUrl: string): string | nul
 // ─── .emlx Parsing ──────────────────────────────────────────────
 
 /** Find the position where headers end (double newline). Returns -1 if not found. */
-function findHeaderBodySplit(text: string): { pos: number; skip: number } {
+export function findHeaderBodySplit(text: string): { pos: number; skip: number } {
   const crlfPos = text.indexOf("\r\n\r\n");
   const lfPos = text.indexOf("\n\n");
   if (crlfPos >= 0 && lfPos >= 0) {
@@ -132,7 +131,7 @@ function findHeaderBodySplit(text: string): { pos: number; skip: number } {
 }
 
 /** Get a header value from raw headers (handles folded lines). */
-function getHeader(headers: string, name: string): string {
+export function getHeader(headers: string, name: string): string {
   const unfolded = headers.replace(/\r?\n[ \t]+/g, " ");
   const re = new RegExp(`^${name}:\\s*(.*)$`, "im");
   const m = unfolded.match(re);
@@ -217,32 +216,83 @@ function extractTextFromMime(headers: string, body: string): string {
 }
 
 /**
+ * Read the raw RFC 822 email content from an .emlx file.
+ * Returns null if the file can't be read, doesn't exist, or exceeds MAX_EMLX_SIZE.
+ *
+ * .emlx format: first line is byte count, then RFC 822 email, then Apple plist.
+ */
+export function readEmlxRaw(filePath: string): string | null {
+  try {
+    const st = statSync(filePath);
+    if (st.size > MAX_EMLX_SIZE) return null;
+  } catch {
+    return null;
+  }
+  try {
+    const buf = readFileSync(filePath);
+    const firstNewline = buf.indexOf(0x0a);
+    if (firstNewline === -1) return null;
+    const byteCount = parseInt(buf.subarray(0, firstNewline).toString("utf-8").trim(), 10);
+    if (isNaN(byteCount)) return null;
+    const emailStart = firstNewline + 1;
+    return buf.subarray(emailStart, emailStart + byteCount).toString("utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Async version of readEmlxRaw. Avoids blocking the event loop for large files.
+ */
+export async function readEmlxRawAsync(filePath: string): Promise<string | null> {
+  try {
+    const st = await stat(filePath);
+    if (st.size > MAX_EMLX_SIZE) return null;
+    const buf = await readFile(filePath);
+    const firstNewline = buf.indexOf(0x0a);
+    if (firstNewline === -1) return null;
+    const byteCount = parseInt(buf.subarray(0, firstNewline).toString("utf-8").trim(), 10);
+    if (isNaN(byteCount)) return null;
+    const emailStart = firstNewline + 1;
+    return buf.subarray(emailStart, emailStart + byteCount).toString("utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Extract plain text body from an .emlx file.
  * Format: first line is byte count, then RFC 822 email, then Apple plist metadata.
  * Handles multipart MIME, base64, and quoted-printable encoding.
  */
 export function parseEmlxBody(filePath: string): string {
+  // Check for oversized files explicitly for user-facing message
   try {
-    const st = statSync(filePath);
-    if (st.size > MAX_EMLX_SIZE) {
-      return "(File too large to process)";
-    }
-  } catch {
-    /* file may not exist — let readFileSync throw below */
-  }
-  const buf = readFileSync(filePath);
+    if (statSync(filePath).size > MAX_EMLX_SIZE) return "(File too large to process)";
+  } catch { /* readEmlxRaw handles missing files */ }
 
-  // First line is the byte count of the email portion
-  const firstNewline = buf.indexOf(0x0a); // '\n'
-  if (firstNewline === -1) return "";
-  const byteCount = parseInt(buf.subarray(0, firstNewline).toString("utf-8").trim(), 10);
-  if (isNaN(byteCount)) return "";
+  const emailContent = readEmlxRaw(filePath);
+  if (!emailContent) return "";
 
-  // Extract the email portion using byte offsets, then decode to string
-  const emailStart = firstNewline + 1;
-  const emailContent = buf.subarray(emailStart, emailStart + byteCount).toString("utf-8");
+  const split = findHeaderBodySplit(emailContent);
+  if (split.pos < 0) return "";
 
-  // Split headers from body (double newline separates them)
+  const headers = emailContent.substring(0, split.pos);
+  const body = emailContent.substring(split.pos + split.skip);
+
+  return extractTextFromMime(headers, body);
+}
+
+/** Async version of parseEmlxBody. Avoids blocking the event loop for large files. */
+export async function parseEmlxBodyAsync(filePath: string): Promise<string> {
+  try {
+    const st = await stat(filePath);
+    if (st.size > MAX_EMLX_SIZE) return "(File too large to process)";
+  } catch { /* readEmlxRawAsync handles missing files */ }
+
+  const emailContent = await readEmlxRawAsync(filePath);
+  if (!emailContent) return "";
+
   const split = findHeaderBodySplit(emailContent);
   if (split.pos < 0) return "";
 
@@ -437,7 +487,8 @@ export async function indexNewMessages(
       try {
         const rawBody = parseEmlxBody(emlxPath);
         const body = cleanBodyForIndex(rawBody);
-        // Use hex encoding to safely embed body in SQL (avoids all escaping issues)
+        // Use hex encoding to safely embed body in SQL (avoids all escaping issues).
+        // Safe because hex strings only contain [0-9a-f] — no SQL injection possible.
         const hexBody = Buffer.from(body, "utf-8").toString("hex");
         inserts.push(`INSERT OR IGNORE INTO email_content(rowid, body, indexed_at) VALUES(${rowid}, CAST(X'${hexBody}' AS TEXT), ${now});`);
         if (body.length > FTS_MIN_INDEXED_BODY_LENGTH) {
@@ -527,29 +578,13 @@ export interface FtsSearchResult {
   snippet: string;
 }
 
-/**
- * Build a mailbox URL filter for use in Envelope Index queries.
- * Uses the shared account resolver from config.ts.
- */
+/** Build a mailbox URL filter, delegating to the shared config helper. */
 async function ftsMailboxFilter(
   mailbox: string,
   account?: string
 ): Promise<string> {
-  const effectiveAccount = account || getDefaultMailAccount();
-  const encodedMailbox = sqlLikeEscape(encodeURIComponent(mailbox));
-
-  if (effectiveAccount) {
-    try {
-      const { executeJxa } = await import("../shared/applescript.js");
-      const uuid = await resolveMailAccountUuid(effectiveAccount, executeJxa);
-      if (uuid) {
-        return `mb.url LIKE '%${sqlLikeEscape(uuid)}/${encodedMailbox}' ESCAPE '\\'`;
-      }
-    } catch {
-      // Fall through to unfiltered mailbox match
-    }
-  }
-  return `mb.url LIKE '%/${encodedMailbox}' ESCAPE '\\'`;
+  const { executeJxa } = await import("../shared/applescript.js");
+  return mailboxUrlFilter(mailbox, account, executeJxa);
 }
 
 /**

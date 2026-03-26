@@ -12,6 +12,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readdirSync, existsSync } from "node:fs";
+import { sqlLikeEscape } from "./sqlite.js";
 
 export function getCalendarNames(): string[] | null {
   const val = process.env.MACOS_MCP_CALENDARS;
@@ -103,11 +104,6 @@ let _mailAccountPopulated = false;
 let _mailAccountExpiry = 0;
 
 /**
- * Resolve a Mail account name to its UUID.
- * Uses a shared TTL cache so multiple modules don't each maintain their own.
- * Requires the caller to pass in executeJxa to avoid circular imports.
- */
-/**
  * Get a cached Map of account ID → account name.
  * Used by mail tools to resolve account names from mailbox URLs.
  */
@@ -132,7 +128,8 @@ export async function getMailAccountMap(
     _mailAccountMap = map;
     _mailAccountMapExpiry = Date.now() + DEFAULT_CACHE_TTL_MS;
     return map;
-  } catch {
+  } catch (e) {
+    process.stderr.write(`[config] Failed to refresh mail account map: ${e instanceof Error ? e.message : String(e)}\n`);
     return _mailAccountMap ?? new Map();
   }
 }
@@ -155,8 +152,9 @@ export async function resolveMailAccountUuid(
           for (const a of accounts) {
             _mailAccountCache.set(a.name.toLowerCase(), a.id);
           }
-        } catch {
+        } catch (e) {
           // Populate flag still set to prevent retries on failure
+          process.stderr.write(`[config] Failed to refresh mail account UUIDs: ${e instanceof Error ? e.message : String(e)}\n`);
         }
         _mailAccountPopulated = true;
         _mailAccountExpiry = Date.now() + DEFAULT_CACHE_TTL_MS;
@@ -166,4 +164,25 @@ export async function resolveMailAccountUuid(
     await _mailAccountRefreshPromise;
   }
   return _mailAccountCache.get(accountName.toLowerCase()) ?? null;
+}
+
+/**
+ * Build SQL filter for account-specific mailbox URL matching.
+ * Used by mail tools and FTS search to filter queries by mailbox/account.
+ */
+export async function mailboxUrlFilter(
+  mailbox: string,
+  account: string | undefined,
+  executeJxa: <T>(script: string) => Promise<T>
+): Promise<string> {
+  const effectiveAccount = account || getDefaultMailAccount();
+  const encodedMailbox = sqlLikeEscape(encodeURIComponent(mailbox));
+
+  if (effectiveAccount) {
+    const uuid = await resolveMailAccountUuid(effectiveAccount, executeJxa);
+    if (uuid) {
+      return `mb.url LIKE '%${sqlLikeEscape(uuid)}/${encodedMailbox}' ESCAPE '\\'`;
+    }
+  }
+  return `mb.url LIKE '%/${encodedMailbox}' ESCAPE '\\'`;
 }

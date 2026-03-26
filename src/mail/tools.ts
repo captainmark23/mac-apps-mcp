@@ -10,14 +10,11 @@
  * move_message, flag_message, mark_read
  */
 
-import { readFileSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import { writeFileSync, unlinkSync } from "node:fs";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-/** Maximum .emlx file size to read (50 MB). Larger files are skipped to prevent OOM. */
-const MAX_EMLX_SIZE = 50 * 1024 * 1024;
 
 /** Maximum characters of cleaned body text to return for display. */
 const MAX_BODY_DISPLAY_CHARS = 50_000;
@@ -37,15 +34,17 @@ const ENCODED_CONTENT_MIN_LENGTH = 200;
 import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
 import { sqliteQuery, sqlEscape, sqlLikeEscape, safeInt } from "../shared/sqlite.js";
 import {
-  getDefaultMailAccount,
   getMailDbPath,
   getMailAccountMap,
-  resolveMailAccountUuid,
+  mailboxUrlFilter,
 } from "../shared/config.js";
 import { PaginatedResult, paginateRows, sanitizeErrorMessage } from "../shared/types.js";
 import {
   resolveEmlxPath,
-  parseEmlxBody,
+  readEmlxRaw,
+  parseEmlxBodyAsync,
+  findHeaderBodySplit,
+  getHeader,
   decodeQuotedPrintable,
   stripHtml,
 } from "./fts.js";
@@ -55,16 +54,7 @@ async function accountMailboxFilter(
   mailbox: string,
   account?: string
 ): Promise<string> {
-  const effectiveAccount = account || getDefaultMailAccount();
-  const encodedMailbox = sqlLikeEscape(encodeURIComponent(mailbox));
-
-  if (effectiveAccount) {
-    const uuid = await resolveMailAccountUuid(effectiveAccount, executeJxa);
-    if (uuid) {
-      return `mb.url LIKE '%${sqlLikeEscape(uuid)}/${encodedMailbox}' ESCAPE '\\'`;
-    }
-  }
-  return `mb.url LIKE '%/${encodedMailbox}' ESCAPE '\\'`;
+  return mailboxUrlFilter(mailbox, account, executeJxa);
 }
 
 /** Parse a mailbox URL into account ID and mailbox name. */
@@ -86,47 +76,21 @@ export function parseMailboxUrl(url: string): { accountId: string; mailboxName: 
 
 /** Extract key headers (Message-ID, Reply-To) from an .emlx file. */
 function parseEmlxHeaders(filePath: string): { messageId: string; replyTo: string } {
+  const empty = { messageId: "", replyTo: "" };
   try {
-    const st = statSync(filePath);
-    if (st.size > MAX_EMLX_SIZE) {
-      return { messageId: "", replyTo: "" };
-    }
-    const buf = readFileSync(filePath);
-    const firstNewline = buf.indexOf(0x0a);
-    if (firstNewline === -1) return { messageId: "", replyTo: "" };
-    const byteCount = parseInt(buf.subarray(0, firstNewline).toString("utf-8").trim(), 10);
-    if (isNaN(byteCount)) return { messageId: "", replyTo: "" };
+    const emailContent = readEmlxRaw(filePath);
+    if (!emailContent) return empty;
 
-    const emailStart = firstNewline + 1;
-    const emailContent = buf.subarray(emailStart, emailStart + byteCount).toString("utf-8");
+    const split = findHeaderBodySplit(emailContent);
+    if (split.pos < 0) return empty;
 
-    const headerEnd = emailContent.indexOf("\r\n\r\n");
-    const headerEnd2 = emailContent.indexOf("\n\n");
-    const splitPos =
-      headerEnd >= 0 && headerEnd2 >= 0
-        ? Math.min(headerEnd, headerEnd2)
-        : headerEnd >= 0
-          ? headerEnd
-          : headerEnd2;
-    if (splitPos < 0) return { messageId: "", replyTo: "" };
-
-    const headerBlock = emailContent.substring(0, splitPos);
-    // Unfold continuation lines (RFC 2822)
-    const unfolded = headerBlock.replace(/\r?\n[ \t]+/g, " ");
-
-    let messageId = "";
-    let replyTo = "";
-    for (const line of unfolded.split(/\r?\n/)) {
-      const lower = line.toLowerCase();
-      if (lower.startsWith("message-id:")) {
-        messageId = line.substring(11).trim();
-      } else if (lower.startsWith("reply-to:")) {
-        replyTo = line.substring(9).trim();
-      }
-    }
-    return { messageId, replyTo };
+    const headers = emailContent.substring(0, split.pos);
+    return {
+      messageId: getHeader(headers, "Message-ID"),
+      replyTo: getHeader(headers, "Reply-To"),
+    };
   } catch {
-    return { messageId: "", replyTo: "" };
+    return empty;
   }
 }
 
@@ -141,11 +105,11 @@ export function cleanBodyForDisplay(raw: string): string {
 }
 
 /** Get a short body preview for an email (first ~200 chars of cleaned body). */
-function getBodyPreview(messageId: number, mailboxUrl: string): string {
+async function getBodyPreview(messageId: number, mailboxUrl: string): Promise<string> {
   try {
     const emlxPath = resolveEmlxPath(messageId, mailboxUrl);
     if (!emlxPath) return "";
-    const rawBody = parseEmlxBody(emlxPath);
+    const rawBody = await parseEmlxBodyAsync(emlxPath);
     let text = decodeQuotedPrintable(rawBody);
     text = stripHtml(text);
     text = text.replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim();
@@ -235,7 +199,7 @@ async function queryAttachmentMetadata(
       }
     } catch (e) {
       // Fall through to MIME parsing; log so DB errors aren't silently lost
-      console.error(`[mail] attachment query failed for message ${safeInt(messageId)}, falling back to MIME:`, sanitizeErrorMessage(String(e)));
+      process.stderr.write(`[mail] attachment query failed for message ${safeInt(messageId)}, falling back to MIME: ${sanitizeErrorMessage(String(e))}\n`);
     }
   }
 
@@ -263,18 +227,8 @@ function parseAttachmentHeaders(
     const emlxPath = resolveEmlxPath(messageId, mailboxUrl);
     if (!emlxPath) return [];
 
-    const st = statSync(emlxPath);
-    if (st.size > MAX_EMLX_SIZE) {
-      return [];
-    }
-    const buf = readFileSync(emlxPath);
-    const firstNewline = buf.indexOf(0x0a);
-    if (firstNewline === -1) return [];
-    const byteCount = parseInt(buf.subarray(0, firstNewline).toString("utf-8").trim(), 10);
-    if (isNaN(byteCount)) return [];
-
-    const emailStart = firstNewline + 1;
-    const emailContent = buf.subarray(emailStart, emailStart + byteCount).toString("utf-8");
+    const emailContent = readEmlxRaw(emlxPath);
+    if (!emailContent) return [];
 
     const attachments: { filename: string; mimeType: string; size: number }[] = [];
 
@@ -446,7 +400,7 @@ export async function getEmails(
 
   const total = safeInt(countRows[0]?.total ?? 0);
 
-  const items = rows.map((r) => {
+  const items = await Promise.all(rows.map(async (r) => {
     const parsed = parseMailboxUrl(String(r.mailbox_url || ""));
     const id = safeInt(r.id);
     return {
@@ -458,9 +412,9 @@ export async function getEmails(
       flagged: r.flagged === 1,
       mailbox: parsed?.mailboxName || "",
       account: (parsed ? accountMap.get(parsed.accountId) : undefined) || "",
-      preview: getBodyPreview(id, String(r.mailbox_url || "")),
+      preview: await getBodyPreview(id, String(r.mailbox_url || "")),
     };
-  });
+  }));
 
   return paginateRows(items, total, offset);
 }
@@ -506,6 +460,9 @@ export async function getEmail(
     ),
   ]);
 
+  // Resolve account map once (used for JXA fallback and return value)
+  const accountMap = await getMailAccountMap(executeJxa);
+
   // Read body and headers directly from .emlx file (fast, no JXA needed)
   let content = "";
   let replyTo = "";
@@ -514,7 +471,7 @@ export async function getEmail(
   const emlxPath = resolveEmlxPath(safeInt(messageId), mailboxUrl);
   if (emlxPath) {
     try {
-      const rawBody = parseEmlxBody(emlxPath);
+      const rawBody = await parseEmlxBodyAsync(emlxPath);
       content = cleanBodyForDisplay(rawBody);
       const headers = parseEmlxHeaders(emlxPath);
       replyTo = headers.replyTo;
@@ -526,7 +483,6 @@ export async function getEmail(
     // Fallback: try JXA for messages not yet downloaded to disk
     try {
       const mailboxName = parsed?.mailboxName || "INBOX";
-      const accountMap = await getMailAccountMap(executeJxa);
       const accountName = parsed ? accountMap.get(parsed.accountId) : undefined;
 
       const acctSetup = accountName
@@ -561,8 +517,6 @@ export async function getEmail(
 
   // Get attachment metadata
   const attachments = await queryAttachmentMetadata(safeInt(messageId), mailboxUrl);
-
-  const accountMap = await getMailAccountMap(executeJxa);
 
   return {
     id: safeInt(r.id),
@@ -643,7 +597,7 @@ export async function searchMail(
 
   const total = safeInt(countRows[0]?.total ?? 0);
 
-  const items = rows.map((r) => {
+  const items = await Promise.all(rows.map(async (r) => {
     const parsed = parseMailboxUrl(String(r.mailbox_url || ""));
     const id = safeInt(r.id);
     return {
@@ -655,9 +609,9 @@ export async function searchMail(
       flagged: r.flagged === 1,
       mailbox: parsed?.mailboxName || "",
       account: (parsed ? accountMap.get(parsed.accountId) : undefined) || "",
-      preview: getBodyPreview(id, String(r.mailbox_url || "")),
+      preview: await getBodyPreview(id, String(r.mailbox_url || "")),
     };
-  });
+  }));
 
   return paginateRows(items, total, offset);
 }
@@ -666,18 +620,49 @@ export async function searchMail(
 
 /** Keychain service name for the iCloud SMTP app-specific password. */
 const SMTP_KEYCHAIN_SERVICE = "macos-mcp-smtp";
-const SMTP_HOST = "smtp.mail.me.com";
-const SMTP_PORT = 587;
-const SMTP_USER = "markdphillips@mac.com";
+const SMTP_HOST = process.env.MACOS_MCP_SMTP_HOST || "smtp.mail.me.com";
+const SMTP_PORT = parseInt(process.env.MACOS_MCP_SMTP_PORT || "587", 10);
 
-/** Retrieve the SMTP password from macOS Keychain. */
-function getSmtpPassword(): string {
-  const result = execFileSync(
-    "/usr/bin/security",
-    ["find-generic-password", "-s", SMTP_KEYCHAIN_SERVICE, "-a", SMTP_USER, "-w"],
-    { timeout: 5000 }
-  );
-  return result.toString().trim();
+/**
+ * Retrieve SMTP credentials (email + password) from macOS Keychain.
+ * The Keychain entry's "account" field stores the email address,
+ * and the password field stores the app-specific SMTP password.
+ *
+ * To set up:
+ *   security add-generic-password -s "macos-mcp-smtp" -a "your@email.com" -w
+ */
+function getSmtpCredentials(): { user: string; password: string } {
+  try {
+    // Read the Keychain entry to extract the account (email address)
+    const info = execFileSync(
+      "/usr/bin/security",
+      ["find-generic-password", "-s", SMTP_KEYCHAIN_SERVICE],
+      { timeout: 5000 }
+    ).toString();
+
+    const acctMatch = info.match(/"acct"<blob>="([^"]+)"/);
+    if (!acctMatch) {
+      throw new Error("Account field not found in Keychain entry");
+    }
+    const user = acctMatch[1];
+
+    // Read the password separately (the -w flag returns only the password)
+    const password = execFileSync(
+      "/usr/bin/security",
+      ["find-generic-password", "-s", SMTP_KEYCHAIN_SERVICE, "-a", user, "-w"],
+      { timeout: 5000 }
+    ).toString().trim();
+
+    return { user, password };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `SMTP credentials not found in Keychain. Set up with:\n` +
+      `  security add-generic-password -s "${SMTP_KEYCHAIN_SERVICE}" -a "your@email.com" -w\n` +
+      `(you will be prompted for your app-specific password)\n` +
+      `Detail: ${sanitizeErrorMessage(msg)}`
+    );
+  }
 }
 
 /**
@@ -693,7 +678,7 @@ async function sendHtmlViaSmtp(opts: {
   cc?: string[];
   bcc?: string[];
 }): Promise<{ success: boolean; message: string }> {
-  const password = getSmtpPassword();
+  const { user, password } = getSmtpCredentials();
 
   // Write HTML and plain text to temp files to avoid shell escaping issues
   const id = randomUUID();
@@ -701,15 +686,20 @@ async function sendHtmlViaSmtp(opts: {
   const textFile = join(tmpdir(), `macos-mcp-text-${id}.txt`);
 
   try {
-    writeFileSync(htmlFile, opts.htmlBody, "utf-8");
-    writeFileSync(textFile, opts.body, "utf-8");
+    writeFileSync(htmlFile, opts.htmlBody, { encoding: "utf-8", mode: 0o600 });
+    writeFileSync(textFile, opts.body, { encoding: "utf-8", mode: 0o600 });
 
     const allRecipients = [...opts.to, ...(opts.cc || []), ...(opts.bcc || [])];
 
+    // Password is passed via environment variable (not embedded in script args)
+    // to avoid exposure in process listings (ps aux).
     const pyScript = `
-import smtplib, json, sys
+import smtplib, os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
+smtp_user = ${JSON.stringify(user)}
+smtp_pass = os.environ['MACOS_MCP_SMTP_PASS']
 
 with open(${JSON.stringify(textFile)}, 'r') as f:
     plain = f.read()
@@ -717,7 +707,7 @@ with open(${JSON.stringify(htmlFile)}, 'r') as f:
     html = f.read()
 
 msg = MIMEMultipart('alternative')
-msg['From'] = ${JSON.stringify(SMTP_USER)}
+msg['From'] = smtp_user
 msg['To'] = ${JSON.stringify(opts.to.join(", "))}
 ${opts.cc?.length ? `msg['Cc'] = ${JSON.stringify(opts.cc.join(", "))}` : ""}
 msg['Subject'] = ${JSON.stringify(opts.subject)}
@@ -726,15 +716,15 @@ msg.attach(MIMEText(html, 'html', 'utf-8'))
 
 with smtplib.SMTP(${JSON.stringify(SMTP_HOST)}, ${SMTP_PORT}) as s:
     s.starttls()
-    s.login(${JSON.stringify(SMTP_USER)}, ${JSON.stringify(password)})
-    s.sendmail(${JSON.stringify(SMTP_USER)}, ${JSON.stringify(allRecipients)}, msg.as_string())
+    s.login(smtp_user, smtp_pass)
+    s.sendmail(smtp_user, ${JSON.stringify(allRecipients)}, msg.as_string())
 `;
 
     await new Promise<void>((resolve, reject) => {
       execFileCb(
         "/usr/bin/python3",
         ["-c", pyScript],
-        { timeout: 30000 },
+        { timeout: 30000, env: { ...process.env, MACOS_MCP_SMTP_PASS: password } },
         (err, _stdout, stderr) => {
           if (err) reject(new Error(`SMTP send failed: ${stderr?.toString().trim() || err.message}`));
           else resolve();
@@ -811,9 +801,12 @@ export async function createDraft(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
-  // Use iCloud SMTP for HTML drafts — sends immediately since Mail.app can't compose HTML drafts
+  // Mail.app cannot compose HTML drafts via scripting — refuse rather than silently sending
   if (htmlBody) {
-    return sendHtmlViaSmtp({ to, subject, body, htmlBody, cc });
+    throw new Error(
+      "HTML drafts are not supported. Mail.app's scripting interface cannot create HTML drafts. " +
+      "Use mail_send with htmlBody to send HTML email directly, or create a plain text draft."
+    );
   }
 
   const acctSetup = account
@@ -852,8 +845,7 @@ export async function replyTo(
   replyAll = false,
   send = true,
   mailbox?: string,
-  account?: string,
-  htmlBody?: string
+  account?: string
 ): Promise<{ success: boolean; message: string }> {
   if (!mailbox || !account) {
     const loc = await resolveMessageLocation(messageId);
@@ -862,10 +854,6 @@ export async function replyTo(
   }
 
   const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
-
-  // Note: htmlBody is accepted but ignored for replies — JXA htmlContent is read-only
-  // on outgoing messages. Replies use plain text body. HTML replies would need MIME approach
-  // with thread context, which is not yet implemented.
 
   return executeJxaWrite(`
     const Mail = Application("Mail");
@@ -893,8 +881,7 @@ export async function forwardMessage(
   body?: string,
   send = true,
   mailbox?: string,
-  account?: string,
-  htmlBody?: string
+  account?: string
 ): Promise<{ success: boolean; message: string }> {
   if (!mailbox || !account) {
     const loc = await resolveMessageLocation(messageId);
@@ -904,7 +891,6 @@ export async function forwardMessage(
 
   const acctSetup = `const acct = Mail.accounts.byName(${jxaString(account)});`;
 
-  // Note: htmlBody is accepted but ignored for forwards — JXA htmlContent is read-only
   const fwdContentBlock = body
     ? `fwd.content = ${jxaString(body)} + "\\n\\n" + fwd.content();`
     : "";

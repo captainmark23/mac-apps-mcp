@@ -56,6 +56,11 @@ export async function sqliteQuery<T extends SqliteRow = SqliteRow>(
 /**
  * Escape a string for use in SQL queries.
  * Uses single-quote escaping (SQL standard).
+ *
+ * IMPORTANT: All user-provided strings MUST be passed through sqlEscape() or
+ * sqlLikeEscape() before interpolation into SQL. The system sqlite3 CLI does
+ * not support parameterized queries, so manual escaping is required.
+ * Zod validates at the MCP boundary; safeInt() validates integers.
  */
 export function sqlEscape(value: string): string {
   return value.replace(/'/g, "''");

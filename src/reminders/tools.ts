@@ -14,12 +14,9 @@ import { readdirSync, statSync } from "node:fs";
 import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
 import { sqliteQuery, sqlEscape, safeInt } from "../shared/sqlite.js";
 import { getReminderLists } from "../shared/config.js";
-import { PaginatedResult, paginateRows, CORE_DATA_EPOCH_OFFSET, fromCoreDataTimestamp } from "../shared/types.js";
+import { PaginatedResult, paginateRows, CORE_DATA_EPOCH_OFFSET, SECONDS_PER_DAY, fromCoreDataTimestamp } from "../shared/types.js";
 
 export const REMINDER_ID_PREFIX = "x-apple-reminder://";
-
-/** Seconds in one day. Used for due-date boundary calculations. */
-const SECONDS_PER_DAY = 86400;
 
 /**
  * Find the active Reminders SQLite database.
@@ -54,14 +51,20 @@ function findRemindersDb(): string {
         bestSize = size;
         best = f;
       }
-    } catch {}
+    } catch { /* skip inaccessible files */ }
   }
   return join(storesDir, best);
 }
 
 let _remindersDb: string | null = null;
+let _remindersDbExpiry = 0;
+const DB_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
 function getRemindersDb(): string {
-  if (!_remindersDb) _remindersDb = findRemindersDb();
+  if (!_remindersDb || Date.now() > _remindersDbExpiry) {
+    _remindersDb = findRemindersDb();
+    _remindersDbExpiry = Date.now() + DB_CACHE_TTL_MS;
+  }
   return _remindersDb;
 }
 
