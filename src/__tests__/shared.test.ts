@@ -3,10 +3,11 @@
  * Run with: npm test
  */
 
-import { describe, it } from "node:test";
+import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { sqlEscape, sqlLikeEscape, safeInt } from "../shared/sqlite.js";
 import { paginateArray, paginateRows, fromCoreDataTimestamp, sanitizeErrorMessage } from "../shared/types.js";
+import { isReadOnly } from "../shared/config.js";
 import { jxaString, jxaStringArray } from "../shared/applescript.js";
 import { emlxSubpath, decodeQuotedPrintable, stripHtml } from "../mail/fts.js";
 
@@ -503,5 +504,54 @@ describe("stripHtml", () => {
 
   it("handles nested tags", () => {
     assert.equal(stripHtml("<div><span><b>text</b></span></div>").trim(), "text");
+  });
+});
+
+// ─── isReadOnly ──────────────────────────────────────────────────
+
+describe("isReadOnly", () => {
+  const originalEnv = process.env.MACOS_MCP_READONLY;
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.MACOS_MCP_READONLY;
+    } else {
+      process.env.MACOS_MCP_READONLY = originalEnv;
+    }
+  });
+
+  it("returns false when env var is not set", () => {
+    delete process.env.MACOS_MCP_READONLY;
+    assert.equal(isReadOnly(), false);
+  });
+
+  it("returns true when env var is 'true'", () => {
+    process.env.MACOS_MCP_READONLY = "true";
+    assert.equal(isReadOnly(), true);
+  });
+
+  it("returns true when env var is '1'", () => {
+    process.env.MACOS_MCP_READONLY = "1";
+    assert.equal(isReadOnly(), true);
+  });
+
+  it("returns false when env var is 'false'", () => {
+    process.env.MACOS_MCP_READONLY = "false";
+    assert.equal(isReadOnly(), false);
+  });
+
+  it("returns false when env var is '0'", () => {
+    process.env.MACOS_MCP_READONLY = "0";
+    assert.equal(isReadOnly(), false);
+  });
+
+  it("returns false when env var is 'yes'", () => {
+    process.env.MACOS_MCP_READONLY = "yes";
+    assert.equal(isReadOnly(), false);
+  });
+
+  it("returns false when env var is empty string", () => {
+    process.env.MACOS_MCP_READONLY = "";
+    assert.equal(isReadOnly(), false);
   });
 });

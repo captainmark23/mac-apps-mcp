@@ -23,6 +23,7 @@ import { registerMailTools, registerMailResources, EmailSummaryZ } from "./mail/
 import { registerCalendarTools, registerCalendarResources, EventSummaryZ } from "./calendar/register.js";
 import { registerRemindersTools, registerRemindersResources, ReminderSummaryZ } from "./reminders/register.js";
 import { registerContactsTools, registerContactsResources } from "./contacts/register.js";
+import { isReadOnly } from "./shared/config.js";
 
 import * as mail from "./mail/tools.js";
 import * as mailFts from "./mail/fts.js";
@@ -82,6 +83,10 @@ const FTS_AUTO_INDEX_BATCH = 5_000;
 const FTS_AUTO_INDEX_INCREMENTAL = 50_000;
 
 // ─── Register Domain Tools & Resources ──────────────────────────
+
+if (isReadOnly()) {
+  log("Read-only mode enabled (MACOS_MCP_READONLY). Write tools will not be registered.");
+}
 
 registerMailTools(server);
 registerCalendarTools(server);

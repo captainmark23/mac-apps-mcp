@@ -6,6 +6,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { z } from "zod";
 import { ok, err, paginatedOutput, SuccessZ, SuccessMessageZ, resource } from "../shared/mcp-helpers.js";
 import { sanitizeErrorMessage } from "../shared/types.js";
+import { isReadOnly } from "../shared/config.js";
 import * as mail from "./tools.js";
 import * as mailFts from "./fts.js";
 
@@ -153,6 +154,7 @@ export function registerMailTools(server: McpServer): void {
     } catch (e) { return err(e); }
   });
 
+  if (!isReadOnly()) {
   server.registerTool("mail_send", {
     title: "Send Email",
     description: "Send an email. Supports HTML formatting via htmlBody for rich text (bold, italic, links, tables, etc). For important emails, prefer mail_create_draft so the user can review first. Use when: sending a quick reply, automated email dispatch",
@@ -270,6 +272,7 @@ export function registerMailTools(server: McpServer): void {
       return ok(result, false);
     } catch (e) { return err(e); }
   });
+  } // end read-only guard
 
   // ─── FTS Tools ──────────────────────────────────────────────────
 

@@ -68,6 +68,28 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `MACOS_MCP_MAIL_ACCOUNT` | Default mail account name | First account |
 | `MACOS_MCP_REMINDER_LISTS` | Comma-separated reminder list names to include | All lists |
 | `MACOS_MCP_WRITE_RATE_LIMIT` | Max write operations per minute | 10 |
+| `MACOS_MCP_READONLY` | Disable all write tools (`true` or `1`) | Not set (all tools) |
+
+### Read-Only Mode
+
+To disable all write operations (send, reply, forward, create, delete, etc.):
+
+```json
+{
+  "mcpServers": {
+    "macos": {
+      "command": "npx",
+      "args": ["macos-mcp-server"],
+      "env": {
+        "MACOS_MCP_READONLY": "true"
+      }
+    }
+  }
+}
+```
+
+When enabled, write tools are not registered and won't appear in the tool list.
+Read operations (listing, searching, viewing) and FTS indexing remain available.
 
 ## Tools (33)
 

@@ -5,6 +5,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok, err, isoDateString, paginatedOutput, SuccessZ, SuccessIdZ, resource } from "../shared/mcp-helpers.js";
+import { isReadOnly } from "../shared/config.js";
 import * as reminders from "./tools.js";
 
 // ─── Output Schemas ─────────────────────────────────────────────
@@ -82,6 +83,7 @@ export function registerRemindersTools(server: McpServer): void {
     } catch (e) { return err(e); }
   });
 
+  if (!isReadOnly()) {
   server.registerTool("reminders_create", {
     title: "Create Reminder",
     description: "Create a new reminder. Use when: adding a task or to-do item, setting a due-date reminder",
@@ -133,6 +135,7 @@ export function registerRemindersTools(server: McpServer): void {
       return ok(result, false);
     } catch (e) { return err(e); }
   });
+  } // end read-only guard
 }
 
 // ─── Resource Registrations ─────────────────────────────────────

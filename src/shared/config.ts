@@ -30,6 +30,12 @@ export function getReminderLists(): string[] | null {
   return val.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+/** Check if write operations are disabled via MACOS_MCP_READONLY. */
+export function isReadOnly(): boolean {
+  const val = process.env.MACOS_MCP_READONLY;
+  return val === "true" || val === "1";
+}
+
 // ─── Mail DB Auto-Detection ──────────────────────────────────────
 
 let _mailDbPath: string | null = null;
