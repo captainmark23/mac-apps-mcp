@@ -37,6 +37,7 @@ import {
   getMailDbPath,
   getMailAccountMap,
   mailboxUrlFilter,
+  isSendAsDraft,
 } from "../shared/config.js";
 import { PaginatedResult, paginateRows, sanitizeErrorMessage } from "../shared/types.js";
 import {
@@ -750,6 +751,16 @@ export async function sendEmail(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
+  if (isSendAsDraft()) {
+    if (htmlBody) {
+      return { success: false, message: "MACOS_MCP_SEND_AS_DRAFT is set but HTML drafts are not supported by Mail.app scripting. Remove htmlBody or disable MACOS_MCP_SEND_AS_DRAFT to send HTML email." };
+    }
+    if (bcc?.length) {
+      return { success: false, message: "MACOS_MCP_SEND_AS_DRAFT is set but Mail.app scripting does not support bcc on drafts. Remove bcc or disable MACOS_MCP_SEND_AS_DRAFT." };
+    }
+    return createDraft(to, subject, body, cc, account);
+  }
+
   // Use iCloud SMTP for HTML emails (Apple Mail's scripting strips HTML from outgoing)
   if (htmlBody) {
     return sendHtmlViaSmtp({ to, subject, body, htmlBody, cc, bcc });

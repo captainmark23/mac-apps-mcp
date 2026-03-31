@@ -3,12 +3,13 @@
  * Run with: npm test
  */
 
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { sqlEscape, sqlLikeEscape, safeInt } from "../shared/sqlite.js";
 import { paginateArray, paginateRows, fromCoreDataTimestamp, sanitizeErrorMessage } from "../shared/types.js";
 import { jxaString, jxaStringArray } from "../shared/applescript.js";
 import { emlxSubpath, decodeQuotedPrintable, stripHtml } from "../mail/fts.js";
+import { isSendAsDraft } from "../shared/config.js";
 
 // ─── sqlEscape ──────────────────────────────────────────────────
 
@@ -503,5 +504,43 @@ describe("stripHtml", () => {
 
   it("handles nested tags", () => {
     assert.equal(stripHtml("<div><span><b>text</b></span></div>").trim(), "text");
+  });
+});
+
+// ─── isSendAsDraft ────────────────────────────────────────────────
+
+describe("isSendAsDraft", () => {
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    savedEnv = process.env.MACOS_MCP_SEND_AS_DRAFT;
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) {
+      delete process.env.MACOS_MCP_SEND_AS_DRAFT;
+    } else {
+      process.env.MACOS_MCP_SEND_AS_DRAFT = savedEnv;
+    }
+  });
+
+  it("returns false when env var is not set", () => {
+    delete process.env.MACOS_MCP_SEND_AS_DRAFT;
+    assert.equal(isSendAsDraft(), false);
+  });
+
+  it("returns true when set to 'true'", () => {
+    process.env.MACOS_MCP_SEND_AS_DRAFT = "true";
+    assert.equal(isSendAsDraft(), true);
+  });
+
+  it("returns true when set to '1'", () => {
+    process.env.MACOS_MCP_SEND_AS_DRAFT = "1";
+    assert.equal(isSendAsDraft(), true);
+  });
+
+  it("returns false for other values", () => {
+    process.env.MACOS_MCP_SEND_AS_DRAFT = "yes";
+    assert.equal(isSendAsDraft(), false);
   });
 });
