@@ -30,6 +30,15 @@ export function getReminderLists(): string[] | null {
   return val.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+/**
+ * When true, email body content is sanitized before returning to the LLM client.
+ * Controlled by MACOS_MCP_SANITIZE_BODIES=true|1.
+ */
+export function isSanitizeBodies(): boolean {
+  const val = process.env.MACOS_MCP_SANITIZE_BODIES;
+  return val === "true" || val === "1";
+}
+
 // ─── Mail DB Auto-Detection ──────────────────────────────────────
 
 let _mailDbPath: string | null = null;

@@ -40,6 +40,47 @@ export function sanitizeErrorMessage(msg: string): string {
     .replace(/\/tmp\/[^\s:'"]+/g, "[path]");
 }
 
+/**
+ * Known prompt injection patterns to strip from email body content.
+ * Matches common instruction-hijacking phrases and model-control tokens.
+ */
+const INJECTION_PATTERNS: RegExp[] = [
+  /ignore\s+(all\s+)?previous\s+instructions?/gi,
+  /disregard\s+(all\s+)?previous\s+instructions?/gi,
+  /forget\s+(all\s+)?previous\s+instructions?/gi,
+  /new\s+instructions?:/gi,
+  /\bsystem\s*:/gi,
+  /<\|im_start\|>/g,
+  /<\|im_end\|>/g,
+  /<\/s>/g,
+  /\[INST\]/g,
+  /\[\/INST\]/g,
+  /\[SYS\]/g,
+  /\[\/SYS\]/g,
+];
+
+/**
+ * Strip known prompt injection patterns from a body text string.
+ * Used for email list previews where delimiters would be too verbose.
+ */
+export function stripInjectionPatterns(text: string): string {
+  let result = text;
+  for (const pattern of INJECTION_PATTERNS) {
+    result = result.replace(pattern, "[redacted]");
+  }
+  return result;
+}
+
+/**
+ * Sanitize email body content before returning to an LLM client.
+ * Strips known injection patterns and wraps in untrusted-content delimiters.
+ * Only applied when MACOS_MCP_SANITIZE_BODIES=true.
+ */
+export function sanitizeBodyContent(text: string): string {
+  const stripped = stripInjectionPatterns(text);
+  return `[UNTRUSTED EMAIL CONTENT]\n${stripped}\n[END UNTRUSTED CONTENT]`;
+}
+
 /** Standard paginated response envelope for list/search tools. */
 export interface PaginatedResult<T> {
   total: number;
