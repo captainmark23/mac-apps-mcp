@@ -3,12 +3,13 @@
  * Run with: npm test
  */
 
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { sqlEscape, sqlLikeEscape, safeInt } from "../shared/sqlite.js";
 import { paginateArray, paginateRows, fromCoreDataTimestamp, sanitizeErrorMessage } from "../shared/types.js";
 import { jxaString, jxaStringArray } from "../shared/applescript.js";
 import { emlxSubpath, decodeQuotedPrintable, stripHtml } from "../mail/fts.js";
+import { matchesAllowlist, findBlockedRecipient } from "../shared/config.js";
 
 // ─── sqlEscape ──────────────────────────────────────────────────
 
@@ -503,5 +504,75 @@ describe("stripHtml", () => {
 
   it("handles nested tags", () => {
     assert.equal(stripHtml("<div><span><b>text</b></span></div>").trim(), "text");
+  });
+});
+
+// ─── matchesAllowlist ─────────────────────────────────────────────
+
+describe("matchesAllowlist", () => {
+  it("matches exact address", () => {
+    assert.ok(matchesAllowlist("alice@example.com", ["alice@example.com"]));
+  });
+
+  it("rejects address not in list", () => {
+    assert.ok(!matchesAllowlist("bob@example.com", ["alice@example.com"]));
+  });
+
+  it("matches wildcard domain pattern", () => {
+    assert.ok(matchesAllowlist("anyone@company.com", ["*@company.com"]));
+  });
+
+  it("rejects address outside wildcard domain", () => {
+    assert.ok(!matchesAllowlist("anyone@evil.com", ["*@company.com"]));
+  });
+
+  it("matching is case-insensitive", () => {
+    assert.ok(matchesAllowlist("Alice@COMPANY.COM", ["*@company.com"]));
+  });
+
+  it("matches when one of multiple patterns applies", () => {
+    assert.ok(matchesAllowlist("guest@external.com", ["*@company.com", "guest@external.com"]));
+  });
+
+  it("wildcard does not span dots by accident — domain must still match fully", () => {
+    assert.ok(!matchesAllowlist("alice@evilcompany.com", ["*@company.com"]));
+  });
+});
+
+// ─── findBlockedRecipient ─────────────────────────────────────────
+
+describe("findBlockedRecipient", () => {
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    savedEnv = process.env.MACOS_MCP_ALLOWED_RECIPIENTS;
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) {
+      delete process.env.MACOS_MCP_ALLOWED_RECIPIENTS;
+    } else {
+      process.env.MACOS_MCP_ALLOWED_RECIPIENTS = savedEnv;
+    }
+  });
+
+  it("returns null when env var is not set", () => {
+    delete process.env.MACOS_MCP_ALLOWED_RECIPIENTS;
+    assert.equal(findBlockedRecipient(["anyone@anywhere.com"]), null);
+  });
+
+  it("returns null when all recipients match the allowlist", () => {
+    process.env.MACOS_MCP_ALLOWED_RECIPIENTS = "*@company.com";
+    assert.equal(findBlockedRecipient(["alice@company.com", "bob@company.com"]), null);
+  });
+
+  it("returns the first blocked address", () => {
+    process.env.MACOS_MCP_ALLOWED_RECIPIENTS = "*@company.com";
+    assert.equal(findBlockedRecipient(["alice@company.com", "attacker@evil.com"]), "attacker@evil.com");
+  });
+
+  it("rejects with multiple patterns when none match", () => {
+    process.env.MACOS_MCP_ALLOWED_RECIPIENTS = "*@company.com,trusted@partner.com";
+    assert.equal(findBlockedRecipient(["unknown@other.com"]), "unknown@other.com");
   });
 });

@@ -37,6 +37,7 @@ import {
   getMailDbPath,
   getMailAccountMap,
   mailboxUrlFilter,
+  findBlockedRecipient,
 } from "../shared/config.js";
 import { PaginatedResult, paginateRows, sanitizeErrorMessage } from "../shared/types.js";
 import {
@@ -750,6 +751,12 @@ export async function sendEmail(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
+  const allRecipients = [...to, ...(cc ?? []), ...(bcc ?? [])];
+  const blocked = findBlockedRecipient(allRecipients);
+  if (blocked) {
+    return { success: false, message: `Recipient not allowed by MACOS_MCP_ALLOWED_RECIPIENTS: ${blocked}` };
+  }
+
   // Use iCloud SMTP for HTML emails (Apple Mail's scripting strips HTML from outgoing)
   if (htmlBody) {
     return sendHtmlViaSmtp({ to, subject, body, htmlBody, cc, bcc });
