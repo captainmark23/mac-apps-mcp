@@ -39,6 +39,24 @@ export function isReadOnly(): boolean {
   return val === "true" || val === "1";
 }
 
+/**
+ * When true, mail_send saves to Mail.app drafts instead of sending.
+ * Controlled by MACOS_MCP_SEND_AS_DRAFT=true|1.
+ */
+export function isSendAsDraft(): boolean {
+  const val = process.env.MACOS_MCP_SEND_AS_DRAFT;
+  return val === "true" || val === "1";
+}
+
+/**
+ * When true, email body content is sanitized before returning to the LLM client.
+ * Controlled by MACOS_MCP_SANITIZE_BODIES=true|1.
+ */
+export function isSanitizeBodies(): boolean {
+  const val = process.env.MACOS_MCP_SANITIZE_BODIES;
+  return val === "true" || val === "1";
+}
+
 // ─── Recipient Allowlist ─────────────────────────────────────────
 
 /**

@@ -38,8 +38,10 @@ import {
   getMailAccountMap,
   mailboxUrlFilter,
   findBlockedRecipient,
+  isSendAsDraft,
+  isSanitizeBodies,
 } from "../shared/config.js";
-import { PaginatedResult, paginateRows, sanitizeErrorMessage } from "../shared/types.js";
+import { PaginatedResult, paginateRows, sanitizeErrorMessage, sanitizeBodyContent, stripInjectionPatterns } from "../shared/types.js";
 import {
   resolveEmlxPath,
   readEmlxRaw,
@@ -102,7 +104,9 @@ export function cleanBodyForDisplay(raw: string): string {
   text = text.replace(new RegExp(`https?:\\/\\/\\S{${LONG_URL_MIN_LENGTH},}`, "g"), "[long URL removed]");
   text = text.replace(new RegExp(`[A-Za-z0-9+/=]{${ENCODED_CONTENT_MIN_LENGTH},}`, "g"), "[encoded content removed]");
   text = text.replace(/\s+/g, " ").trim();
-  return text.substring(0, MAX_BODY_DISPLAY_CHARS);
+  text = text.substring(0, MAX_BODY_DISPLAY_CHARS);
+  if (isSanitizeBodies()) text = sanitizeBodyContent(text);
+  return text;
 }
 
 /** Get a short body preview for an email (first ~200 chars of cleaned body). */
@@ -114,7 +118,9 @@ async function getBodyPreview(messageId: number, mailboxUrl: string): Promise<st
     let text = decodeQuotedPrintable(rawBody);
     text = stripHtml(text);
     text = text.replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim();
-    return text.substring(0, MAX_PREVIEW_CHARS);
+    text = text.substring(0, MAX_PREVIEW_CHARS);
+    if (isSanitizeBodies()) text = stripInjectionPatterns(text);
+    return text;
   } catch {
     return "";
   }
@@ -508,7 +514,7 @@ export async function getEmail(
           messageId: m.messageId() || ""
         });
       `);
-      content = bodyResult.content;
+      content = isSanitizeBodies() ? sanitizeBodyContent(bodyResult.content) : bodyResult.content;
       replyTo = bodyResult.replyTo;
       msgId = bodyResult.messageId;
     } catch {
@@ -751,6 +757,16 @@ export async function sendEmail(
   account?: string,
   htmlBody?: string
 ): Promise<{ success: boolean; message: string }> {
+  if (isSendAsDraft()) {
+    if (htmlBody) {
+      return { success: false, message: "MACOS_MCP_SEND_AS_DRAFT is set but HTML drafts are not supported by Mail.app scripting. Remove htmlBody or disable MACOS_MCP_SEND_AS_DRAFT to send HTML email." };
+    }
+    if (bcc?.length) {
+      return { success: false, message: "MACOS_MCP_SEND_AS_DRAFT is set but Mail.app scripting does not support bcc on drafts. Remove bcc or disable MACOS_MCP_SEND_AS_DRAFT." };
+    }
+    return createDraft(to, subject, body, cc, account);
+  }
+
   const allRecipients = [...to, ...(cc ?? []), ...(bcc ?? [])];
   const blocked = findBlockedRecipient(allRecipients);
   if (blocked) {
