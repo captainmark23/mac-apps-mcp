@@ -7,7 +7,7 @@
  *
  * MACOS_MCP_MAIL_ACCOUNT: Default mail account name.
  * MACOS_MCP_REMINDER_LISTS: Comma-separated list of reminder lists to include.
- * MACOS_MCP_ALLOWED_RECIPIENTS: Comma-separated list of allowed recipient patterns for mail_send.
+ * MACOS_MCP_ALLOWED_RECIPIENTS: Comma-separated list of allowed recipient patterns for mail_send and mail_forward.
  *   Supports wildcard (*) matching. If set, any recipient not matching causes an error.
  *   Example: "*@yourcompany.com,trusted@example.com"
  */

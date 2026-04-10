@@ -870,6 +870,11 @@ export async function replyTo(
   mailbox?: string,
   account?: string
 ): Promise<{ success: boolean; message: string }> {
+  // Honour MACOS_MCP_SEND_AS_DRAFT — force draft mode
+  if (isSendAsDraft()) {
+    send = false;
+  }
+
   if (!mailbox || !account) {
     const loc = await resolveMessageLocation(messageId);
     mailbox = mailbox || loc.mailboxName;
@@ -906,6 +911,17 @@ export async function forwardMessage(
   mailbox?: string,
   account?: string
 ): Promise<{ success: boolean; message: string }> {
+  // Validate recipients against allowlist
+  const blocked = findBlockedRecipient(to);
+  if (blocked) {
+    return { success: false, message: `Recipient not allowed by MACOS_MCP_ALLOWED_RECIPIENTS: ${blocked}` };
+  }
+
+  // Honour MACOS_MCP_SEND_AS_DRAFT — force draft mode
+  if (isSendAsDraft()) {
+    send = false;
+  }
+
   if (!mailbox || !account) {
     const loc = await resolveMessageLocation(messageId);
     mailbox = mailbox || loc.mailboxName;

@@ -198,7 +198,7 @@ export function registerMailTools(server: McpServer): void {
 
   server.registerTool("mail_reply", {
     title: "Reply to Email",
-    description: "Reply to an email (plain text only). Set send=false to save as draft for review. Use when: responding to a conversation, following up on a thread",
+    description: "Reply to an email (plain text only). Set send=false to save as draft for review. Honours MACOS_MCP_SEND_AS_DRAFT (forces draft mode). Use when: responding to a conversation, following up on a thread",
     inputSchema: z.object({
       messageId: z.number().describe("Email ID to reply to"),
       body: z.string().max(100000).describe("Plain text reply body"),
@@ -218,7 +218,7 @@ export function registerMailTools(server: McpServer): void {
 
   server.registerTool("mail_forward", {
     title: "Forward Email",
-    description: "Forward an email (plain text only). Set send=false to save as draft for review. Mailbox and account are auto-resolved from the message ID if not provided. Use when: sharing an email with someone else, delegating a message",
+    description: "Forward an email (plain text only). Set send=false to save as draft for review. Validates recipients against MACOS_MCP_ALLOWED_RECIPIENTS and honours MACOS_MCP_SEND_AS_DRAFT (forces draft mode). Mailbox and account are auto-resolved from the message ID if not provided. Use when: sharing an email with someone else, delegating a message",
     inputSchema: z.object({
       messageId: z.number().describe("Email ID to forward"),
       to: z.array(z.string().email("Invalid email address")).min(1, "At least one recipient required").describe("Forward to these addresses"),
