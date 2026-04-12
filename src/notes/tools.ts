@@ -360,6 +360,7 @@ export async function getNote(
   const rows = await sqliteQuery(
     db,
     `SELECT
+       n.Z_PK AS pk,
        n.ZIDENTIFIER AS identifier,
        n.ZTITLE1 AS title,
        n.ZSNIPPET AS snippet,
@@ -395,6 +396,14 @@ export async function getNote(
   if (isLocked) {
     body = "[This note is password-protected. Unlock it in Notes.app to read the body.]";
   } else {
+    // JXA note IDs are x-coredata:// URIs (e.g. x-coredata://UUID/ICNote/p133)
+    // where the suffix 'p133' matches Z_PK in SQLite. The prefix varies per account.
+    // We look up by title within the account, and disambiguate by
+    // creation date if there are multiple notes with the same title.
+    const noteTitle = String(r.title || "");
+    const accountName = String(r.account_name || "");
+    const creationIso = fromCoreDataTimestamp(r.creation_date);
+
     const jxaResult = await executeJxa<{
       plaintext: string;
       html: string;
@@ -402,9 +411,36 @@ export async function getNote(
       attachmentCount: number;
     }>(`
       const app = Application("Notes");
-      const matches = app.notes.whose({id: {_contains: ${jxaString(identifier)}}})();
-      if (matches.length === 0) throw new Error("Note not found via JXA");
-      const n = matches[0];
+      const title = ${jxaString(noteTitle)};
+      const accountName = ${jxaString(accountName)};
+      const targetCreation = ${jxaString(creationIso)};
+
+      // Search within the account if known, otherwise all notes
+      let candidates;
+      if (accountName) {
+        try {
+          candidates = app.accounts.byName(accountName).notes.whose({name: title})();
+        } catch(e) {
+          candidates = app.notes.whose({name: title})();
+        }
+      } else {
+        candidates = app.notes.whose({name: title})();
+      }
+
+      if (candidates.length === 0) throw new Error("Note not found via JXA");
+
+      // Disambiguate by creation date if multiple matches
+      let n = candidates[0];
+      if (candidates.length > 1 && targetCreation) {
+        const targetMs = new Date(targetCreation).getTime();
+        for (const c of candidates) {
+          if (Math.abs(c.creationDate().getTime() - targetMs) < 2000) {
+            n = c;
+            break;
+          }
+        }
+      }
+
       JSON.stringify({
         plaintext: n.plaintext(),
         html: n.body(),
@@ -457,12 +493,73 @@ export async function getNotesModifiedToday(
  * Escape plain text for embedding in HTML body.
  * Converts newlines to <br> and escapes HTML entities.
  */
-function textToHtml(text: string): string {
+export function textToHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/\n/g, "<br>");
+}
+
+/**
+ * Resolve a note UUID (ZIDENTIFIER) to its title, account, and creation date
+ * for JXA lookup. JXA uses x-coredata:// IDs which differ from SQLite UUIDs,
+ * so we must look up by title + creation date for disambiguation.
+ */
+async function resolveNoteForJxa(identifier: string): Promise<{
+  title: string;
+  accountName: string;
+  creationIso: string;
+}> {
+  const db = getNotesDbPath();
+  const rows = await sqliteQuery(
+    db,
+    `SELECT n.ZTITLE1 AS title, a.ZNAME AS account_name, n.ZCREATIONDATE3 AS creation_date
+     FROM ZICCLOUDSYNCINGOBJECT n
+     LEFT JOIN ZICCLOUDSYNCINGOBJECT a ON a.Z_PK = n.ZACCOUNT7
+     WHERE n.Z_ENT = ${ENT_NOTE}
+       AND n.ZIDENTIFIER = '${sqlEscape(identifier)}'
+     LIMIT 1;`
+  );
+  if (!rows.length) throw new Error("Note not found");
+  return {
+    title: String(rows[0].title || ""),
+    accountName: String(rows[0].account_name || ""),
+    creationIso: fromCoreDataTimestamp(rows[0].creation_date),
+  };
+}
+
+/**
+ * Build a JXA snippet that finds a note by title within an account,
+ * disambiguating by creation date when multiple notes share the same title.
+ * Returns the variable name 'n' pointing to the resolved note.
+ */
+function jxaFindNoteSnippet(title: string, accountName: string, creationIso: string): string {
+  return `
+      const _title = ${jxaString(title)};
+      const _acct = ${jxaString(accountName)};
+      const _targetCreation = ${jxaString(creationIso)};
+      let _candidates;
+      if (_acct) {
+        try {
+          _candidates = app.accounts.byName(_acct).notes.whose({name: _title})();
+        } catch(e) {
+          _candidates = app.notes.whose({name: _title})();
+        }
+      } else {
+        _candidates = app.notes.whose({name: _title})();
+      }
+      if (_candidates.length === 0) throw new Error("Note not found");
+      let n = _candidates[0];
+      if (_candidates.length > 1 && _targetCreation) {
+        const _targetMs = new Date(_targetCreation).getTime();
+        for (const _c of _candidates) {
+          if (Math.abs(_c.creationDate().getTime() - _targetMs) < 2000) {
+            n = _c;
+            break;
+          }
+        }
+      }`;
 }
 
 export async function createNote(
@@ -499,12 +596,11 @@ export async function updateNote(
   format: "plaintext" | "html" = "plaintext"
 ): Promise<{ success: boolean; name: string }> {
   const htmlBody = format === "html" ? body : `<div>${textToHtml(body)}</div>`;
+  const resolved = await resolveNoteForJxa(identifier);
 
   return executeJxaWrite(`
     const app = Application("Notes");
-    const matches = app.notes.whose({id: {_contains: ${jxaString(identifier)}}})();
-    if (matches.length === 0) throw new Error("Note not found");
-    const n = matches[0];
+    ${jxaFindNoteSnippet(resolved.title, resolved.accountName, resolved.creationIso)}
     if (n.passwordProtected()) throw new Error("Cannot modify a password-protected note");
     n.body = ${jxaString(htmlBody)};
     JSON.stringify({
@@ -517,11 +613,12 @@ export async function updateNote(
 export async function deleteNote(
   identifier: string
 ): Promise<{ success: boolean }> {
+  const resolved = await resolveNoteForJxa(identifier);
+
   return executeJxaWrite(`
     const app = Application("Notes");
-    const matches = app.notes.whose({id: {_contains: ${jxaString(identifier)}}})();
-    if (matches.length === 0) throw new Error("Note not found");
-    app.delete(matches[0]);
+    ${jxaFindNoteSnippet(resolved.title, resolved.accountName, resolved.creationIso)}
+    app.delete(n);
     JSON.stringify({ success: true });
   `);
 }
@@ -531,16 +628,16 @@ export async function moveNote(
   folder: string,
   account?: string
 ): Promise<{ success: boolean; folder: string }> {
+  const resolved = await resolveNoteForJxa(identifier);
   const folderRef = account
     ? `app.accounts.byName(${jxaString(account)}).folders.byName(${jxaString(folder)})`
     : `app.folders.byName(${jxaString(folder)})`;
 
   return executeJxaWrite(`
     const app = Application("Notes");
-    const matches = app.notes.whose({id: {_contains: ${jxaString(identifier)}}})();
-    if (matches.length === 0) throw new Error("Note not found");
+    ${jxaFindNoteSnippet(resolved.title, resolved.accountName, resolved.creationIso)}
     const destFolder = ${folderRef};
-    app.move(matches[0], { to: destFolder });
+    app.move(n, { to: destFolder });
     JSON.stringify({
       success: true,
       folder: destFolder.name(),
