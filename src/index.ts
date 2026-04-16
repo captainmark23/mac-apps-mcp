@@ -72,7 +72,7 @@ function log(message: string): void {
 // ─── Server Setup ───────────────────────────────────────────────
 
 const server = new McpServer({
-  name: "macos-mcp-server",
+  name: "mac-apps-mcp-server",
   version: "0.2.0",
 });
 

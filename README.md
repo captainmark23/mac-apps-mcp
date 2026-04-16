@@ -1,4 +1,4 @@
-# macos-mcp
+# mac-apps-mcp
 
 MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders, and Contacts. All reads hit SQLite databases directly for instant results — no slow AppleScript round-trips.
 
@@ -35,8 +35,8 @@ System Settings → Privacy & Security → Full Disk Access:
 ## Installation
 
 ```bash
-git clone https://github.com/captainmark23/macos-mcp.git
-cd macos-mcp
+git clone https://github.com/captainmark23/mac-apps-mcp.git
+cd mac-apps-mcp
 npm install
 npm run build
 ```
@@ -48,9 +48,9 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 ```json
 {
   "mcpServers": {
-    "macos-mcp": {
+    "mac-apps-mcp": {
       "command": "node",
-      "args": ["/path/to/macos-mcp/build/index.js"],
+      "args": ["/path/to/mac-apps-mcp/build/index.js"],
       "env": {
         "MACOS_MCP_CALENDARS": "My Calendar,Shared Calendar",
         "MACOS_MCP_MAIL_ACCOUNT": "MyAccount"
@@ -80,7 +80,7 @@ To disable all write operations (send, reply, forward, create, delete, etc.):
   "mcpServers": {
     "macos": {
       "command": "npx",
-      "args": ["macos-mcp-server"],
+      "args": ["mac-apps-mcp-server"],
       "env": {
         "MACOS_MCP_READONLY": "true"
       }
@@ -101,7 +101,7 @@ To require explicit confirmation before destructive actions (sending email, dele
   "mcpServers": {
     "macos": {
       "command": "npx",
-      "args": ["macos-mcp-server"],
+      "args": ["mac-apps-mcp-server"],
       "env": {
         "MACOS_MCP_CONFIRM_DESTRUCTIVE": "true"
       }

@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a bug in macos-mcp-server
+about: Report a bug in mac-apps-mcp-server
 labels: bug
 ---
 
@@ -21,5 +21,5 @@ What actually happened. Include any error messages or log output.
 ## Environment
 - macOS version:
 - Node.js version:
-- macos-mcp-server version:
+- mac-apps-mcp-server version:
 - MCP client (e.g., Claude Desktop):
