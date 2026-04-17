@@ -5,7 +5,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { toCoreDataTimestamp, statusLabel, participantStatusLabel, rowToEventSummary } from "../calendar/tools.js";
+import { toCoreDataTimestamp, statusLabel, participantStatusLabel, rowToEventSummary, normalizeDateRangeMs } from "../calendar/tools.js";
 import { CORE_DATA_EPOCH_OFFSET } from "../shared/types.js";
 
 // ─── toCoreDataTimestamp ─────────────────────────────────────────
@@ -184,5 +184,58 @@ describe("rowToEventSummary", () => {
     assert.equal(result.calendar, "");
     assert.equal(result.startDate, "");
     assert.equal(result.endDate, "");
+  });
+});
+
+// ─── normalizeDateRangeMs (#50) ──────────────────────────────────
+
+const MS_PER_DAY = 86_400_000;
+
+describe("normalizeDateRangeMs", () => {
+  it("returns same values when end is after start", () => {
+    const [s, e] = normalizeDateRangeMs("2026-04-17", "2026-04-18");
+    assert.equal(s, new Date("2026-04-17").getTime());
+    assert.equal(e, new Date("2026-04-18").getTime());
+  });
+
+  it("extends end by one day when startDate equals endDate", () => {
+    const [s, e] = normalizeDateRangeMs("2026-04-17", "2026-04-17");
+    assert.equal(s, new Date("2026-04-17").getTime());
+    assert.equal(e, new Date("2026-04-17").getTime() + MS_PER_DAY);
+  });
+
+  it("extends end by one day when startDate equals endDate with datetimes", () => {
+    const [s, e] = normalizeDateRangeMs("2026-04-17T00:00:00Z", "2026-04-17T00:00:00Z");
+    assert.equal(s, new Date("2026-04-17T00:00:00Z").getTime());
+    assert.equal(e, s + MS_PER_DAY);
+  });
+
+  it("corrects inverted range (end before start)", () => {
+    const [s, e] = normalizeDateRangeMs("2026-04-18", "2026-04-17");
+    assert.equal(s, new Date("2026-04-18").getTime());
+    assert.equal(e, s + MS_PER_DAY);
+  });
+
+  it("event at noon is included in same-day range", () => {
+    const [sMs, eMs] = normalizeDateRangeMs("2026-04-17", "2026-04-17");
+    const eventStart = new Date("2026-04-17T12:00:00Z").getTime();
+    assert.ok(eventStart >= sMs && eventStart < eMs, "noon event should be in range");
+  });
+
+  it("event at 23:59 is included in same-day range", () => {
+    const [sMs, eMs] = normalizeDateRangeMs("2026-04-17", "2026-04-17");
+    const eventStart = new Date("2026-04-17T23:59:59Z").getTime();
+    assert.ok(eventStart >= sMs && eventStart < eMs, "late event should be in range");
+  });
+
+  it("event on next day is excluded from same-day range", () => {
+    const [sMs, eMs] = normalizeDateRangeMs("2026-04-17", "2026-04-17");
+    const eventStart = new Date("2026-04-18T00:00:00Z").getTime();
+    assert.ok(!(eventStart >= sMs && eventStart < eMs), "next day event should not be in range");
+  });
+
+  it("multi-day range is unchanged", () => {
+    const [s, e] = normalizeDateRangeMs("2026-04-17", "2026-04-20");
+    assert.equal(e - s, 3 * MS_PER_DAY);
   });
 });
