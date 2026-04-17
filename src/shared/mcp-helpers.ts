@@ -55,15 +55,19 @@ export function toMarkdown(data: unknown, indent = 0): string {
 
 /** Format a successful tool response with structured content. */
 export function ok(data: object, pretty = true, format?: "json" | "markdown") {
-  // Markdown format: return plain text without structuredContent
+  // Ensure data is properly typed as a record
+  const dataRecord = data as Record<string, unknown>;
+
+  // Markdown format: return plain text with structuredContent for schema validation
   if (format === "markdown") {
     return {
       content: [{ type: "text" as const, text: toMarkdown(data) }],
+      structuredContent: dataRecord,
     };
   }
 
   // JSON format (default): check for truncation
-  const result = data as Record<string, unknown>;
+  const result = dataRecord;
   let json = JSON.stringify(result, null, pretty ? 2 : undefined);
 
   if (json.length > MAX_RESPONSE_CHARS && Array.isArray(result.items)) {
@@ -72,7 +76,7 @@ export function ok(data: object, pretty = true, format?: "json" | "markdown") {
 
     // Binary search for the right number of items that fits
     while (items.length > 0) {
-      const candidate = {
+      const candidate: Record<string, unknown> = {
         ...result,
         items,
         truncation_message: `Response truncated. Use pagination (offset/limit) or filters to narrow results. Showing ${items.length} of ${totalItems} items.`,
@@ -89,7 +93,7 @@ export function ok(data: object, pretty = true, format?: "json" | "markdown") {
     }
 
     // Fallback: no items fit
-    const fallback = {
+    const fallback: Record<string, unknown> = {
       ...result,
       items: [],
       truncation_message: `Response truncated. Use pagination (offset/limit) or filters to narrow results. Showing 0 of ${totalItems} items.`,
@@ -143,12 +147,9 @@ export function needsConfirmation(
   description: string
 ): ReturnType<typeof ok> | null {
   if (!isConfirmDestructive() || confirm) return null;
-  return {
-    content: [{
-      type: "text" as const,
-      text: `Action "${toolName}" requires confirmation. ${description} Please check with the user, then call again with confirm: true.`,
-    }],
-  };
+  return ok({
+    warning: `Action "${toolName}" requires confirmation. ${description} Please check with the user, then call again with confirm: true.`,
+  });
 }
 
 /** Common output schemas for simple responses. */
