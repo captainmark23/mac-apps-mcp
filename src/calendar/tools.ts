@@ -84,6 +84,18 @@ export type { PaginatedResult } from "../shared/types.js";
 
 // ─── Helpers ────────────────────────────────────────────────────
 
+/**
+ * Normalize a date range so that same-day queries work correctly.
+ * When endMs <= startMs (same date or inverted), extend end by one day.
+ * Returns [startMs, endMs] in milliseconds.
+ */
+export function normalizeDateRangeMs(startDate: string, endDate: string): [number, number] {
+  const sMs = new Date(startDate).getTime();
+  let eMs = new Date(endDate).getTime();
+  if (eMs <= sMs) eMs = sMs + MS_PER_DAY;
+  return [sMs, eMs];
+}
+
 /** Build a SQL WHERE clause to filter by configured calendar names. */
 function calendarWhereClause(calendar?: string): string {
   if (calendar) {
@@ -170,7 +182,9 @@ export async function getEvents(
   offset = 0
 ): Promise<PaginatedResult<EventSummary>> {
   const startTs = toCoreDataTimestamp(startDate);
-  const endTs = toCoreDataTimestamp(endDate);
+  let endTs = toCoreDataTimestamp(endDate);
+  // When startDate === endDate (same-day query), extend end by one day (#50)
+  if (endTs <= startTs) endTs = startTs + SECONDS_PER_DAY;
   const calFilter = calendarWhereClause(calendar);
 
   const rows = await sqliteQuery(
@@ -184,12 +198,11 @@ export async function getEvents(
   );
 
   // Post-filter for precise range (day column is date-granularity)
+  const [sMs, eMs] = normalizeDateRangeMs(startDate, endDate);
   const allItems = rows
     .map(rowToEventSummary)
     .filter((e) => {
       const start = new Date(e.startDate).getTime();
-      const sMs = new Date(startDate).getTime();
-      const eMs = new Date(endDate).getTime();
       return start >= sMs && start < eMs;
     });
 
