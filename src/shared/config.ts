@@ -107,6 +107,34 @@ export function findBlockedRecipient(addresses: string[]): string | null {
   return addresses.find((addr) => !matchesAllowlist(addr, patterns)) ?? null;
 }
 
+// ─── Notes Configuration ─────────────────────────────────────────
+
+export function getNotesFolders(): string[] | null {
+  const val = process.env.MACOS_MCP_NOTES_FOLDERS;
+  if (!val) return null;
+  const folders = val.split(",").map((s) => s.trim()).filter(Boolean);
+  return folders.length > 0 ? folders : null;
+}
+
+export function getDefaultNotesAccount(): string | undefined {
+  return process.env.MACOS_MCP_NOTES_ACCOUNT || undefined;
+}
+
+let _notesDbPath: string | null = null;
+
+export function getNotesDbPath(): string {
+  if (_notesDbPath) return _notesDbPath;
+  const dbPath = join(
+    homedir(),
+    "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+  );
+  if (!existsSync(dbPath)) {
+    throw new Error("Notes database not found. Is Notes.app configured?");
+  }
+  _notesDbPath = dbPath;
+  return _notesDbPath;
+}
+
 // ─── Mail DB Auto-Detection ──────────────────────────────────────
 
 let _mailDbPath: string | null = null;

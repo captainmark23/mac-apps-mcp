@@ -23,12 +23,14 @@ import { registerMailTools, registerMailResources, EmailSummaryZ } from "./mail/
 import { registerCalendarTools, registerCalendarResources, EventSummaryZ } from "./calendar/register.js";
 import { registerRemindersTools, registerRemindersResources, ReminderSummaryZ } from "./reminders/register.js";
 import { registerContactsTools, registerContactsResources } from "./contacts/register.js";
+import { registerNotesTools, registerNotesResources, NoteSummaryZ } from "./notes/register.js";
 import { isReadOnly } from "./shared/config.js";
 
 import * as mail from "./mail/tools.js";
 import * as mailFts from "./mail/fts.js";
 import * as calendar from "./calendar/tools.js";
 import * as reminders from "./reminders/tools.js";
+import * as notes from "./notes/tools.js";
 
 // ─── Persistent file logging ────────────────────────────────────
 // Writes to ~/.macos-mcp/macos-mcp.log with simple size-based rotation.
@@ -92,11 +94,13 @@ registerMailTools(server);
 registerCalendarTools(server);
 registerRemindersTools(server);
 registerContactsTools(server);
+registerNotesTools(server);
 
 registerMailResources(server);
 registerCalendarResources(server);
 registerRemindersResources(server);
 registerContactsResources(server);
+registerNotesResources(server);
 
 // ═══════════════════════════════════════════════════════════════════
 // DAILY BRIEFING (cross-domain convenience tool)
@@ -104,7 +108,7 @@ registerContactsResources(server);
 
 server.registerTool("daily_briefing", {
   title: "Daily Briefing",
-  description: "Get a complete daily briefing: today's calendar events, due/overdue reminders, and flagged/unread emails across all configured mail accounts. Each email includes a body preview. When presenting the briefing: (1) Group emails by account. (2) Use the preview field to accurately describe each email — never guess from the subject line. (3) Call mail_get_email for any email you want to summarize in detail. Use when: morning review, getting a quick overview of the day",
+  description: "Get a complete daily briefing: today's calendar events, due/overdue reminders, flagged/unread emails across all configured mail accounts, and recently modified notes. Each email includes a body preview. When presenting the briefing: (1) Group emails by account. (2) Use the preview field to accurately describe each email — never guess from the subject line. (3) Call mail_get_email for any email you want to summarize in detail. Use when: morning review, getting a quick overview of the day",
   inputSchema: z.object({
     response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
   }).strict(),
@@ -130,6 +134,10 @@ server.registerTool("daily_briefing", {
       totalFlaggedCount: z.number(),
       totalUnreadCount: z.number(),
     }),
+    notes: z.object({
+      count: z.number(),
+      items: z.array(NoteSummaryZ),
+    }),
     errors: z.array(z.string()).optional(),
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -146,6 +154,10 @@ server.registerTool("daily_briefing", {
         reminders.getReminders(undefined, "overdue").catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
         reminders.getReminders(undefined, "incomplete").catch((e: Error) => ({ ...empty, error: e.message })) as Promise<WithError>,
       ]);
+
+    // Notes modified today
+    const notesResult = await notes.getNotesModifiedToday(10)
+      .catch((e: Error) => ({ ...empty, error: e.message })) as WithError;
 
     // Mail: fetch per account
     const errors: string[] = [];
@@ -182,6 +194,7 @@ server.registerTool("daily_briefing", {
       ["reminders_due", dueResult],
       ["reminders_overdue", overdueResult],
       ["reminders_incomplete", incompleteResult],
+      ["notes", notesResult],
     ] as [string, WithError][]) {
       if (result.error) errors.push(`${label}: ${sanitizeErrorMessage(result.error)}`);
     }
@@ -206,6 +219,10 @@ server.registerTool("daily_briefing", {
         accounts: mailAccounts,
         totalFlaggedCount: mailAccounts.reduce((sum, a) => sum + a.flaggedCount, 0),
         totalUnreadCount: mailAccounts.reduce((sum, a) => sum + a.unreadCount, 0),
+      },
+      notes: {
+        count: notesResult.items.length,
+        items: notesResult.items,
       },
       ...(errors.length > 0 ? { errors } : {}),
     };

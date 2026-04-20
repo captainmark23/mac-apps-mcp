@@ -72,13 +72,14 @@ export function stripInjectionPatterns(text: string): string {
 }
 
 /**
- * Sanitize email body content before returning to an LLM client.
+ * Sanitize body content before returning to an LLM client.
  * Strips known injection patterns and wraps in untrusted-content delimiters.
  * Only applied when MACOS_MCP_SANITIZE_BODIES=true.
+ * @param source Label for the content type (default: "EMAIL").
  */
-export function sanitizeBodyContent(text: string): string {
+export function sanitizeBodyContent(text: string, source = "EMAIL"): string {
   const stripped = stripInjectionPatterns(text);
-  return `[UNTRUSTED EMAIL CONTENT]\n${stripped}\n[END UNTRUSTED CONTENT]`;
+  return `[UNTRUSTED ${source} CONTENT]\n${stripped}\n[END UNTRUSTED CONTENT]`;
 }
 
 /** Standard paginated response envelope for list/search tools. */
