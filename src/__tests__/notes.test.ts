@@ -2,6 +2,10 @@
  * Unit tests for Notes tool-level pure functions and SQLite query logic.
  * These tests run without macOS databases — they only test parsing/formatting logic.
  * Integration tests (live DB/JXA) are at the bottom and require macOS + Notes.app.
+ *
+ * IMPORTANT: Run `npm test` locally on macOS before submitting a PR.
+ * Integration tests are skipped in CI (GitHub Actions lacks a GUI session).
+ * See CONTRIBUTING.md for details.
  */
 
 import { describe, it, beforeEach, afterEach } from "node:test";
