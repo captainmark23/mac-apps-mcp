@@ -1,4 +1,4 @@
-# Setting up macos-mcp
+# Setting up mac-apps-mcp
 
 This connects Claude Desktop to your Apple Mail, Calendar, and Reminders so Claude can read your schedule, check your emails, manage reminders, and more.
 
@@ -36,8 +36,8 @@ In Terminal, run:
 
 ```bash
 cd ~
-git clone https://github.com/captainmark23/macos-mcp.git
-cd macos-mcp
+git clone https://github.com/captainmark23/mac-apps-mcp.git
+cd mac-apps-mcp
 npm install
 npm run build
 ```
@@ -69,10 +69,10 @@ Claude Desktop needs permission to read your Mail, Calendar, and Reminders datab
 ```json
 {
   "mcpServers": {
-    "macos-mcp": {
+    "mac-apps-mcp": {
       "command": "node",
       "args": [
-        "/Users/YOUR_USERNAME/macos-mcp/build/index.js"
+        "/Users/YOUR_USERNAME/mac-apps-mcp/build/index.js"
       ],
       "env": {
         "MACOS_MCP_CALENDARS": "Calendar1,Calendar2",
@@ -95,7 +95,7 @@ Claude Desktop needs permission to read your Mail, Calendar, and Reminders datab
 
 ## Step 5: Restart Claude Desktop
 
-Quit Claude Desktop completely (Cmd+Q) and reopen it. The macos-mcp tools should now be available.
+Quit Claude Desktop completely (Cmd+Q) and reopen it. The mac-apps-mcp tools should now be available.
 
 ## Step 6: Test it
 
@@ -134,7 +134,7 @@ After that, you can search with: "Search my emails for invoice from Amazon"
 When updates are available:
 
 ```bash
-cd ~/macos-mcp
+cd ~/mac-apps-mcp
 git pull
 npm install
 npm run build

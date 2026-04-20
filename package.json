@@ -1,11 +1,11 @@
 {
-  "name": "macos-mcp-server",
+  "name": "mac-apps-mcp-server",
   "version": "0.2.0",
   "description": "MCP server for macOS — Apple Mail, Calendar, and Reminders via Claude",
   "type": "module",
   "main": "build/index.js",
   "bin": {
-    "macos-mcp-server": "build/index.js"
+    "mac-apps-mcp-server": "build/index.js"
   },
   "files": [
     "build",
