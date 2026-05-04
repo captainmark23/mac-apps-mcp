@@ -962,6 +962,17 @@ describe("needsConfirmation", () => {
     assert.ok(result!.content[0].text.includes("confirm: true"));
   });
 
+  it("warning structuredContent matches SuccessMessageZ shape", () => {
+    process.env.MACOS_MCP_CONFIRM_DESTRUCTIVE = "true";
+    const result = needsConfirmation(false, "mail_send", "This will send an email.");
+    assert.ok(result !== null);
+    const sc = result!.structuredContent as { success: boolean; message: string };
+    assert.equal(sc.success, false);
+    assert.equal(typeof sc.message, "string");
+    assert.ok(sc.message.includes("mail_send"));
+    assert.ok(sc.message.includes("confirm: true"));
+  });
+
   it("includes the description in the warning", () => {
     process.env.MACOS_MCP_CONFIRM_DESTRUCTIVE = "true";
     const result = needsConfirmation(false, "test_tool", "This will delete everything.");
