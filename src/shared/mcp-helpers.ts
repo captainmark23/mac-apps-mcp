@@ -4,6 +4,7 @@
  * Provides: ok(), err(), toMarkdown(), isoDateString, paginatedOutput()
  */
 
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { sanitizeErrorMessage } from "./types.js";
 import { isConfirmDestructive } from "./config.js";
@@ -156,6 +157,58 @@ export function needsConfirmation(
 export const SuccessZ = { success: z.boolean() };
 export const SuccessMessageZ = { success: z.boolean(), message: z.string() };
 export const SuccessIdZ = { success: z.boolean(), id: z.string() };
+
+/**
+ * JSON Schema dialect that MCP clients validate advertised tool schemas against.
+ * The MCP spec mandates 2020-12.
+ */
+const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
+
+type ToolSchemas = { inputSchema?: unknown; outputSchema?: unknown };
+type ListToolsResult = { tools?: ToolSchemas[] };
+type RequestHandler = (req: unknown, extra: unknown) => Promise<unknown>;
+
+/** Relabel a converted JSON Schema's dialect to 2020-12 in place. */
+function setSchemaDialect(schema: unknown): void {
+  if (schema && typeof schema === "object" && "$schema" in schema) {
+    (schema as Record<string, unknown>).$schema = JSON_SCHEMA_DIALECT;
+  }
+}
+
+/**
+ * Normalize the JSON Schema dialect advertised for every tool to 2020-12.
+ *
+ * Why: the MCP SDK converts our Zod schemas with zod-to-json-schema, which stamps
+ * the draft-07 dialect URI ("http://json-schema.org/draft-07/schema#"). Strict MCP
+ * clients validate tool results against the advertised schema with a 2020-12-only
+ * validator and reject draft-07, so every tool call fails at response validation.
+ * The SDK's Zod-v3 conversion path ignores any target/dialect option (as does the
+ * v4 path unless the SDK passes a target, which it does not), so there is no
+ * supported hook — we rewrite the dialect on the tools/list response instead. Our
+ * schemas use only object/array/enum/primitive constructs, which are identical
+ * across the two dialects, so relabelling them is safe.
+ *
+ * Price: reaches the SDK's private `_requestHandlers` map to wrap the handler it
+ * installed for tools/list. Stable across SDK 1.x; revisit if that internal moves.
+ *
+ * Call after all tools are registered and before `server.connect(...)`.
+ */
+export function normalizeToolSchemaDialect(server: McpServer): void {
+  const handlers = (server.server as unknown as {
+    _requestHandlers: Map<string, RequestHandler>;
+  })._requestHandlers;
+  const original = handlers.get("tools/list");
+  if (!original) return; // no tools registered
+
+  handlers.set("tools/list", async (req, extra) => {
+    const result = (await original(req, extra)) as ListToolsResult;
+    for (const tool of result?.tools ?? []) {
+      setSchemaDialect(tool.inputSchema);
+      setSchemaDialect(tool.outputSchema);
+    }
+    return result;
+  });
+}
 
 /** Wrap a resource handler with error handling. */
 export function resource(uri: string, fn: () => Promise<unknown>) {

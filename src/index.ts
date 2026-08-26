@@ -18,7 +18,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { sanitizeErrorMessage } from "./shared/types.js";
-import { ok, err } from "./shared/mcp-helpers.js";
+import { ok, err, normalizeToolSchemaDialect } from "./shared/mcp-helpers.js";
 import { registerMailTools, registerMailResources, EmailSummaryZ } from "./mail/register.js";
 import { registerCalendarTools, registerCalendarResources, EventSummaryZ } from "./calendar/register.js";
 import { registerRemindersTools, registerRemindersResources, ReminderSummaryZ } from "./reminders/register.js";
@@ -262,6 +262,11 @@ async function autoIndexOnStartup() {
 }
 
 async function main() {
+  // Advertise tool schemas as JSON Schema 2020-12 (the SDK emits draft-07, which
+  // strict MCP clients reject at response validation). Must run after all tools
+  // are registered and before connecting the transport.
+  normalizeToolSchemaDialect(server);
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
