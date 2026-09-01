@@ -141,6 +141,11 @@ export const confirmParam = z.boolean().default(false).describe(
  * Check if a destructive tool should proceed.
  * Returns a warning response if confirmation is required but not provided,
  * or null if the tool should proceed normally.
+ *
+ * The warning shape mirrors SuccessMessageZ (`success`, `message`) so it
+ * validates against the destructive tools' outputSchema. Returning a
+ * differently-shaped object (e.g. `{warning}`) would trip MCP's structured
+ * output validation and surface as `-32602: Output validation error`.
  */
 export function needsConfirmation(
   confirm: boolean,
@@ -149,7 +154,8 @@ export function needsConfirmation(
 ): ReturnType<typeof ok> | null {
   if (!isConfirmDestructive() || confirm) return null;
   return ok({
-    warning: `Action "${toolName}" requires confirmation. ${description} Please check with the user, then call again with confirm: true.`,
+    success: false,
+    message: `Action "${toolName}" requires confirmation. ${description} Please check with the user, then call again with confirm: true.`,
   });
 }
 
