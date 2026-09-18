@@ -1,12 +1,12 @@
 # mac-apps-mcp
 
-MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders, and Contacts. All reads hit SQLite databases directly for instant results — no slow AppleScript round-trips.
+MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders, and Contacts. Ordinary app reads hit SQLite databases directly for instant results — no slow AppleScript round-trips.
 
 ## Features
 
 - **Apple Mail** — list, read, search, send, draft, reply, forward, move, flag emails
 - **Full-text email search** — FTS5 index of email body content with snippets
-- **Apple Calendar** — list, query, create, modify, delete events
+- **Apple Calendar** — list, query, create, modify, delete events; personal iCloud invitations after owner setup
 - **Apple Reminders** — list, query, create, complete, delete reminders
 - **Apple Contacts** — list, search, and get full contact details from the Address Book
 - **Daily briefing** — one-call summary of today's events, due reminders, and unread mail
@@ -110,9 +110,9 @@ To require explicit confirmation before destructive actions (sending email, dele
 }
 ```
 
-When enabled, destructive tools (`mail_send`, `mail_reply`, `mail_forward`, `calendar_delete_event`, `reminders_delete`) require a `confirm: true` parameter. If omitted, the tool returns a warning asking the LLM to check with the user first. For `mail_reply` and `mail_forward`, confirmation is only required when `send: true` (the default) — saving as draft does not require confirmation.
+When enabled, destructive tools (`mail_send`, `mail_reply`, `mail_forward`, `calendar_delete_event`, `calendar_send_invitation`, `reminders_delete`) require a `confirm: true` parameter. If omitted, the tool returns a warning asking the LLM to check with the user first. For `mail_reply` and `mail_forward`, confirmation is only required when `send: true` (the default) — saving as draft does not require confirmation.
 
-## Tools (33)
+## Tools (36)
 
 ### Mail (12)
 
@@ -138,7 +138,7 @@ When enabled, destructive tools (`mail_send`, `mail_reply`, `mail_forward`, `cal
 | `mail_fts_index` | Build or update the full-text search index (supports progress notifications) |
 | `mail_fts_stats` | Get index statistics |
 
-### Calendar (8)
+### Calendar (11)
 
 | Tool | Description |
 |---|---|
@@ -147,9 +147,16 @@ When enabled, destructive tools (`mail_send`, `mail_reply`, `mail_forward`, `cal
 | `calendar_this_week` | Get events for the next 7 days |
 | `calendar_get_events` | Get events in a date range |
 | `calendar_get_event` | Get full event details with attendees |
-| `calendar_create_event` | Create an event |
+| `calendar_create_event` | Create a private entry without invitations |
 | `calendar_modify_event` | Modify an event |
 | `calendar_delete_event` | Delete an event |
+| `calendar_invitation_check` | Read-only check of the owner-selected personal iCloud calendar |
+| `calendar_send_invitation` | Create an approved attendee invitation with durable duplicate prevention |
+| `calendar_get_invitation` | Read back the exact event and per-recipient scheduling/participation |
+
+Personal invitations require separate owner-run Keychain setup. See the
+[tool contract, setup/check and live validation runbook](docs/personal-calendar-invitations.md).
+A stored event does not establish recipient delivery or acceptance.
 
 ### Reminders (6)
 

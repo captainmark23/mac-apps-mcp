@@ -7,6 +7,7 @@ import { z } from "zod";
 import { ok, err, isoDateString, paginatedOutput, SuccessZ, SuccessIdZ, resource, confirmParam, needsConfirmation } from "../shared/mcp-helpers.js";
 import { isReadOnly } from "../shared/config.js";
 import * as calendar from "./tools.js";
+import { registerInvitationTools } from "./invitation-register.js";
 
 // ─── Output Schemas ─────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ const EventFullZ = EventSummaryZ.extend({
 // ─── Tool Registrations ─────────────────────────────────────────
 
 export function registerCalendarTools(server: McpServer): void {
+  registerInvitationTools(server);
   server.registerTool("calendar_list", {
     title: "List Calendars",
     description: "List all calendars (iCloud, Google, Exchange, etc.). Use when: discovering available calendars, checking which calendars are configured",
@@ -133,7 +135,7 @@ export function registerCalendarTools(server: McpServer): void {
   if (!isReadOnly()) {
   server.registerTool("calendar_create_event", {
     title: "Create Calendar Event",
-    description: "Create a new calendar event. Use when: scheduling a meeting, adding an event to the calendar",
+    description: "Create a private calendar entry without attendee invitations. For genuine invitations use calendar_send_invitation. Use when: scheduling a meeting, adding an event to the calendar",
     inputSchema: z.object({
       summary: z.string().max(1000, "Title too long").describe("Event title"),
       startDate: isoDateString.describe("Start date/time (ISO 8601)"),

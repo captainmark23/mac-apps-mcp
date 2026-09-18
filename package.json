@@ -5,12 +5,14 @@
   "type": "module",
   "main": "build/index.js",
   "bin": {
-    "mac-apps-mcp-server": "build/index.js"
+    "mac-apps-mcp-server": "build/index.js",
+    "calendar-invitations": "build/calendar/invitation-setup.js"
   },
   "files": [
     "build",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/personal-calendar-invitations.md"
   ],
   "scripts": {
     "build": "tsc",
@@ -38,6 +40,8 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@xmldom/xmldom": "^0.9.12",
+    "ical.js": "^2.2.1",
     "zod": "^3.22.4"
   },
   "devDependencies": {
