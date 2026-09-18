@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Personal iCloud invitation tools with owner-run calendar selection and Keychain setup, read-only preflight, exact attendee/event read-back, and durable operation identities that prevent repeated sends after uncertain outcomes.
+- Fictional invitation transport and MCP control tests. Live account setup and recipient acceptance remain owner-run validation.
+
 ## [0.2.0] - 2026-03-18
 
 ### Fixed
