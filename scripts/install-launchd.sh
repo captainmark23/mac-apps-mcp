@@ -17,6 +17,7 @@ DOMAIN="gui/$(id -u)"
 [ -f "$ENV_FILE" ] || { echo "No $ENV_FILE. Copy .env.example to .env and fill it in." >&2; exit 1; }
 [ -f "$REPO/build/index.js" ] || { echo "Build first: npm run build" >&2; exit 1; }
 [ -f "$STATE/oauth-password" ] || { echo "Set the connector password first: npm run set-password" >&2; exit 1; }
+[ -f "$STATE/oauth-client" ] || { echo "Create the OAuth client first: npm run new-client" >&2; exit 1; }
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 [ -x "$NODE_BIN" ] || { echo "node not found; set NODE_BIN to the node binary that has Full Disk Access." >&2; exit 1; }
 

@@ -3,7 +3,8 @@
  *
  * Implements the SDK's OAuthServerProvider; the SDK's mcpAuthRouter supplies
  * the endpoints, PKCE (S256) checking and rate limits. What lives here:
- * - Dynamic client registration restricted to Claude's callback URLs.
+ * - One fixed OAuth client (see client.ts) whose secret is checked at /token
+ *   and /revoke. There is no registration endpoint.
  * - A password page at /authorize, posting to /login, locked for 15 minutes
  *   after 5 failures.
  * - Codes (10 minutes), access tokens (1 hour) and rotating refresh tokens
@@ -14,19 +15,18 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { OAuthClientInformationFull, OAuthTokens, OAuthTokenRevocationRequest } from "@modelcontextprotocol/sdk/shared/auth.js";
 import {
-  InvalidClientMetadataError,
   InvalidGrantError,
   InvalidScopeError,
   InvalidTargetError,
   InvalidTokenError,
-  TooManyRequestsError,
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { type ClientCredentials, verifyClientSecret } from "./client.js";
 import { verifyPassword } from "./password.js";
 
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -35,36 +35,18 @@ const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const MAX_FAILURES = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
-/**
- * Registration is public, so cap stored clients. At the cap only the oldest
- * client with no unexpired code or token makes room; grants need the
- * password, so registering alone can never sign anyone out.
- */
-const MAX_CLIENTS = 50;
 
-/** claude.ai, Desktop, mobile and Cowork; the claude.com form is announced as a future move. */
-const HOSTED_CALLBACKS = new Set([
+/**
+ * Where the client may send sign-in codes: Claude's hosted callback (claude.ai,
+ * Desktop, mobile, Cowork; the claude.com form is announced as a future move)
+ * and Claude Code's loopback callback, whose port the SDK relaxes at /authorize.
+ */
+const REDIRECT_URIS = [
   "https://claude.ai/api/mcp/auth_callback",
   "https://claude.com/api/mcp/auth_callback",
-]);
-
-/**
- * Redirect URIs a client may register: Claude's hosted callback, or Claude
- * Code's loopback callback on any port (the SDK relaxes the port at /authorize).
- */
-export function isAllowedRedirectUri(uri: string): boolean {
-  if (HOSTED_CALLBACKS.has(uri)) return true;
-  let u: URL;
-  try {
-    u = new URL(uri);
-  } catch {
-    return false;
-  }
-  return u.protocol === "http:"
-    && (u.hostname === "localhost" || u.hostname === "127.0.0.1")
-    && u.pathname === "/callback"
-    && !u.search && !u.hash && !u.username && !u.password;
-}
+  "http://localhost/callback",
+  "http://127.0.0.1/callback",
+];
 
 interface StoredGrant {
   clientId: string;
@@ -79,7 +61,6 @@ interface StoredCode extends StoredGrant {
 }
 
 interface AuthState {
-  clients: Record<string, OAuthClientInformationFull>;
   codes: Record<string, StoredCode>;
   access: Record<string, StoredGrant>;
   refresh: Record<string, StoredGrant>;
@@ -104,35 +85,53 @@ function escapeHtml(s: string): string {
 }
 
 export interface ConnectorAuthOptions {
-  /** JSON file for clients, codes and token hashes (created 0600). */
+  /** JSON file for code and token hashes (created 0600). */
   stateFile: string;
   /** scrypt hash of the connector password. */
   passwordHash: string;
   /** The protected resource (<public url>/mcp); tokens are bound to it. */
   resource: URL;
+  /** The one client allowed to sign in. Replacing it invalidates every token. */
+  client: ClientCredentials;
   log?: (message: string) => void;
 }
 
 export class ConnectorAuth implements OAuthServerProvider {
   private state: AuthState;
+  private readonly client: OAuthClientInformationFull;
+  /** Handed to the SDK as the client secret; only authenticateClient supplies it. */
+  private readonly sdkSecret = newSecret();
   private readonly pending = new Map<string, PendingAuthorization>();
   private failures = 0;
   private lockedUntil = 0;
 
   constructor(private readonly opts: ConnectorAuthOptions) {
     this.state = this.load();
+    // The SDK compares secrets in plain text from the form body only, so
+    // authenticateClient checks the real one first. The SDK gets a per-process
+    // secret that only authenticateClient puts in the body: any route that
+    // reached the SDK without it fails the SDK's own check.
+    this.client = {
+      client_id: opts.client.clientId,
+      client_secret: this.sdkSecret,
+      client_name: "Claude",
+      redirect_uris: REDIRECT_URIS,
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "client_secret_basic",
+    };
   }
 
   // ─── Persistence ─────────────────────────────────────────────
 
   private load(): AuthState {
-    const empty: AuthState = { clients: {}, codes: {}, access: {}, refresh: {} };
-    if (!existsSync(this.opts.stateFile)) return empty;
+    if (!existsSync(this.opts.stateFile)) return { codes: {}, access: {}, refresh: {} };
     try {
-      return { ...empty, ...JSON.parse(readFileSync(this.opts.stateFile, "utf8")) };
+      const saved = JSON.parse(readFileSync(this.opts.stateFile, "utf8")) as Partial<AuthState>;
+      return { codes: saved.codes ?? {}, access: saved.access ?? {}, refresh: saved.refresh ?? {} };
     } catch (e) {
       this.opts.log?.(`Auth state unreadable, starting empty: ${e instanceof Error ? e.message : String(e)}`);
-      return empty;
+      return { codes: {}, access: {}, refresh: {} };
     }
   }
 
@@ -149,44 +148,47 @@ export class ConnectorAuth implements OAuthServerProvider {
     renameSync(tmp, this.opts.stateFile);
   }
 
-  // ─── Client registration ─────────────────────────────────────
+  // ─── Client ──────────────────────────────────────────────────
 
   get clientsStore(): OAuthRegisteredClientsStore {
-    return {
-      getClient: async (clientId: string) => this.state.clients[clientId],
-      registerClient: async (client: OAuthClientInformationFull) => {
-        const rejected = client.redirect_uris.find((uri) => !isAllowedRedirectUri(String(uri)));
-        if (rejected !== undefined || client.redirect_uris.length === 0) {
-          throw new InvalidClientMetadataError(`Redirect URI not allowed: ${rejected ?? "(none)"}`);
-        }
-        if (Object.keys(this.state.clients).length >= MAX_CLIENTS) {
-          const spare = this.oldestUngrantedClient();
-          if (!spare) {
-            throw new TooManyRequestsError("Client limit reached. Sign out unused clients, then connect again.");
-          }
-          delete this.state.clients[spare];
-        }
-        this.state.clients[client.client_id] = client;
-        this.save();
-        this.opts.log?.(`OAuth client registered: ${client.client_id} (${client.client_name ?? "unnamed"})`);
-        return client;
-      },
-    };
+    // No registerClient, so the SDK mounts no /register endpoint.
+    return { getClient: async (clientId: string) => (clientId === this.client.client_id ? this.client : undefined) };
   }
 
-  private oldestUngrantedClient(): string | undefined {
-    const now = Date.now();
-    const granted = new Set<string>();
-    for (const table of [this.state.codes, this.state.access, this.state.refresh]) {
-      for (const grant of Object.values(table)) {
-        if (grant.expiresAt > now) granted.add(grant.clientId);
-      }
+  /**
+   * Client authentication for /token and /revoke, mounted ahead of the SDK's.
+   * Accepts client_secret_basic and client_secret_post and compares hashes in
+   * constant time. Anything else gets 401 invalid_client before the SDK runs.
+   */
+  readonly authenticateClient = (req: Request, res: Response, next: NextFunction): void => {
+    let id: string | undefined;
+    let secret: string | undefined;
+    const header = req.get("authorization") ?? "";
+    if (/^basic /i.test(header)) {
+      // RFC 6749 2.3.1: both parts are form-urlencoded before base64.
+      const decoded = Buffer.from(header.slice(6).trim(), "base64").toString("utf8");
+      const colon = decoded.indexOf(":");
+      try {
+        if (colon >= 0) {
+          id = decodeURIComponent(decoded.slice(0, colon).replace(/\+/g, " "));
+          secret = decodeURIComponent(decoded.slice(colon + 1).replace(/\+/g, " "));
+        }
+      } catch { /* malformed: rejected below */ }
+    } else if (typeof req.body?.client_id === "string" && typeof req.body?.client_secret === "string") {
+      id = req.body.client_id;
+      secret = req.body.client_secret;
     }
-    return Object.keys(this.state.clients)
-      .filter((id) => !granted.has(id))
-      .sort((a, b) =>
-        (this.state.clients[a].client_id_issued_at ?? 0) - (this.state.clients[b].client_id_issued_at ?? 0))[0];
-  }
+    if (id !== this.opts.client.clientId || secret === undefined || !verifyClientSecret(secret, this.opts.client)) {
+      res.status(401)
+        .set("WWW-Authenticate", 'Basic realm="mac-apps-mcp"')
+        .set("Cache-Control", "no-store")
+        .json({ error: "invalid_client", error_description: "Client authentication failed" });
+      return;
+    }
+    // The SDK reads client_id from the body, so carry it over from Basic auth.
+    req.body = { ...(req.body ?? {}), client_id: id, client_secret: this.sdkSecret };
+    next();
+  };
 
   // ─── Authorization (password page) ───────────────────────────
 
@@ -358,7 +360,7 @@ ${error ? `<p class="err">${escapeHtml(error)}</p>` : ""}
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const stored = this.state.access[sha256(token)];
-    if (!stored || !this.state.clients[stored.clientId]) throw new InvalidTokenError("Invalid access token");
+    if (!stored || stored.clientId !== this.client.client_id) throw new InvalidTokenError("Invalid access token");
     if (stored.expiresAt <= Date.now()) throw new InvalidTokenError("Access token has expired");
     return {
       token,

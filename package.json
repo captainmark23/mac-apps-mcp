@@ -16,6 +16,7 @@
     "build": "tsc",
     "start": "node build/index.js",
     "set-password": "node build/transport/set-password.js",
+    "new-client": "node build/transport/new-client.js",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "test": "tsc && node --test build/__tests__/*.test.js",

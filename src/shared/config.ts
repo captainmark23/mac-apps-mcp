@@ -194,6 +194,15 @@ export function getPublicUrl(): URL {
 }
 
 /**
+ * MACOS_MCP_TAILSCALE_LOGIN: the Tailscale login (e.g. you@example.com) allowed
+ * to sign in. When set, the sign-in page answers only that tailnet user, so it
+ * cannot be reached through Funnel. Returned lower-case; null when unset.
+ */
+export function getTailscaleLogin(): string | null {
+  return process.env.MACOS_MCP_TAILSCALE_LOGIN?.trim().toLowerCase() || null;
+}
+
+/**
  * MACOS_MCP_HTTP_TOOLSETS: modules exposed over HTTP, e.g. "mail:read,messages".
  * Modules: mail, calendar, reminders, contacts, notes, messages, briefing.
  * A ":read" suffix keeps only that module's read-only tools. Unset means all.
