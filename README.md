@@ -1,6 +1,6 @@
 # mac-apps-mcp
 
-MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders, and Contacts. All reads hit SQLite databases directly for instant results — no slow AppleScript round-trips.
+MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders, Contacts, Notes and Messages. All reads hit SQLite databases directly for instant results — no slow AppleScript round-trips.
 
 ## Features
 
@@ -9,7 +9,8 @@ MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders
 - **Apple Calendar** — list, query, create, modify, delete events
 - **Apple Reminders** — list, query, create, complete, delete reminders
 - **Apple Contacts** — list, search, and get full contact details from the Address Book
-- **Daily briefing** — one-call summary of today's events, due reminders, and unread mail
+- **Apple Messages**: list chats, read conversations with tapbacks folded in, see unread texts, search, and send iMessage or SMS
+- **Daily briefing** — one-call summary of today's events, due reminders, unread mail and unread texts
 - **MCP resources** — browsable resources for accounts, calendars, lists, and contacts
 - **Zero native dependencies** — uses macOS system `sqlite3` binary and JXA
 
@@ -70,6 +71,8 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `MACOS_MCP_WRITE_RATE_LIMIT` | Max write operations per minute | 10 |
 | `MACOS_MCP_READONLY` | Disable all write tools (`true` or `1`) | Not set (all tools) |
 | `MACOS_MCP_CONFIRM_DESTRUCTIVE` | Require `confirm: true` on destructive tools (`true` or `1`) | Not set |
+| `MACOS_MCP_MESSAGES` | Messages module and the texts section of `daily_briefing` (`off` to disable) | `on` |
+| `MACOS_MCP_MESSAGES_HANDLES_ALLOWLIST` | Comma-separated phone numbers or emails `messages_send` may text (`*` wildcards allowed); every participant of a group must match | Not set (any) |
 
 ### Read-Only Mode
 
@@ -110,9 +113,9 @@ To require explicit confirmation before destructive actions (sending email, dele
 }
 ```
 
-When enabled, destructive tools (`mail_send`, `mail_reply`, `mail_forward`, `calendar_delete_event`, `reminders_delete`) require a `confirm: true` parameter. If omitted, the tool returns a warning asking the LLM to check with the user first. For `mail_reply` and `mail_forward`, confirmation is only required when `send: true` (the default) — saving as draft does not require confirmation.
+When enabled, destructive tools (`mail_send`, `mail_reply`, `mail_forward`, `messages_send`, `calendar_delete_event`, `reminders_delete`) require a `confirm: true` parameter. If omitted, the tool returns a warning asking the LLM to check with the user first. For `mail_reply` and `mail_forward`, confirmation is only required when `send: true` (the default) — saving as draft does not require confirmation.
 
-## Tools (33)
+## Tools (46)
 
 ### Mail (12)
 
@@ -170,11 +173,37 @@ When enabled, destructive tools (`mail_send`, `mail_reply`, `mail_forward`, `cal
 | `contacts_get` | Get full contact details (emails, phones, addresses, notes) |
 | `contacts_search` | Search contacts by name, email, phone, or organization |
 
+### Notes (9)
+
+| Tool | Description |
+|---|---|
+| `notes_list` | List notes with filtering by folder, account, pinned status, or date |
+| `notes_get` | Get a single note with full body content |
+| `notes_search` | Search notes by title and/or snippet content |
+| `notes_list_folders` | List all note folders with note counts |
+| `notes_create` | Create a new note in the specified folder |
+| `notes_update` | Update a note's body content |
+| `notes_delete` | Move a note to Recently Deleted (not permanent deletion) |
+| `notes_move` | Move a note to a different folder |
+| `notes_create_folder` | Create a new folder in Notes |
+
+### Messages (5)
+
+| Tool | Description |
+|---|---|
+| `messages_list_chats` | Recent chats with participants, unread count and last message preview |
+| `messages_get_chat` | Messages in one chat, oldest first, with tapbacks folded into the message they react to |
+| `messages_unread` | Unread incoming texts across all chats (junk excluded) |
+| `messages_search` | Search message text, optionally limited to one person by handle or contact name |
+| `messages_send` | Send to a phone number, email or existing chat; iMessage first, SMS only where that chat already uses SMS |
+
+Reads come from `~/Library/Messages/chat.db`, so the process needs Full Disk Access. Participants are named from Contacts across every address book source. `messages_send` refuses a recipient with no existing chat and no matching contact unless called with `confirm: true`, and reports what `chat.db` shows after the send (`sent`, `delivered`, `failed`, or `unknown` if the row has not appeared). Messages cannot mark chats read through scripting, so there is no mark-read tool.
+
 ### Briefing (1)
 
 | Tool | Description |
 |---|---|
-| `daily_briefing` | Today's events, due/overdue reminders, flagged and unread emails |
+| `daily_briefing` | Today's events, due/overdue reminders, flagged and unread emails, unread texts |
 
 ## Resources
 
@@ -187,6 +216,7 @@ The server exposes browsable MCP resources:
 | `macos://calendars` | All calendars |
 | `macos://reminders/lists` | Reminder lists |
 | `macos://contacts` | Contacts |
+| `macos://messages/chats` | Recent message chats |
 
 ## Full-Text Email Search
 
@@ -219,6 +249,11 @@ src/
     tools.ts            # Reminders reads (SQLite) and writes (JXA)
   contacts/
     tools.ts            # Contacts reads (SQLite)
+  messages/
+    tools.ts            # Messages tools: chats, unread, search, send
+    db.ts               # chat.db queries (SQLite)
+    attributed-body.ts  # Text extraction from attributedBody blobs
+    jxa.ts              # Sending through Messages.app (JXA)
   shared/
     sqlite.ts           # Zero-dep SQLite query helper (/usr/bin/sqlite3)
     applescript.ts       # JXA execution helper with rate-limited write queue
@@ -261,6 +296,12 @@ If you see `SQLite error: unable to open database file` or similar permission er
 Write operations (sending mail, creating events/reminders) use JXA which requires Automation access. If you see `-1743` errors or "not allowed assistive access":
 
 **System Settings → Privacy & Security → Automation** → ensure your terminal/Claude Desktop has permission for Mail, Calendar, and Reminders.
+
+### Messages
+
+1. `Messages database not found` or `unable to open database file`: the process reading `~/Library/Messages/chat.db` needs Full Disk Access. When the server runs under launchd rather than Claude Desktop, grant it to the `node` binary that launchd starts.
+2. `Messages has no chat or participant for this recipient`: Messages scripting only exposes recent chats and known participants. Send the first message from Messages.app, then retry.
+3. `messages_search` matches plain letters case-insensitively but accented and non-Latin text case-sensitively.
 
 ### Reminders database not found
 

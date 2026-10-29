@@ -24,13 +24,15 @@ import { registerCalendarTools, registerCalendarResources, EventSummaryZ } from 
 import { registerRemindersTools, registerRemindersResources, ReminderSummaryZ } from "./reminders/register.js";
 import { registerContactsTools, registerContactsResources } from "./contacts/register.js";
 import { registerNotesTools, registerNotesResources, NoteSummaryZ } from "./notes/register.js";
-import { isReadOnly } from "./shared/config.js";
+import { registerMessagesTools, registerMessagesResources, MessageInChatZ } from "./messages/register.js";
+import { isReadOnly, isMessagesEnabled } from "./shared/config.js";
 
 import * as mail from "./mail/tools.js";
 import * as mailFts from "./mail/fts.js";
 import * as calendar from "./calendar/tools.js";
 import * as reminders from "./reminders/tools.js";
 import * as notes from "./notes/tools.js";
+import * as messages from "./messages/tools.js";
 
 // ─── Persistent file logging ────────────────────────────────────
 // Writes to ~/.macos-mcp/macos-mcp.log with simple size-based rotation.
@@ -95,12 +97,14 @@ registerCalendarTools(server);
 registerRemindersTools(server);
 registerContactsTools(server);
 registerNotesTools(server);
+if (isMessagesEnabled()) registerMessagesTools(server);
 
 registerMailResources(server);
 registerCalendarResources(server);
 registerRemindersResources(server);
 registerContactsResources(server);
 registerNotesResources(server);
+if (isMessagesEnabled()) registerMessagesResources(server);
 
 // ═══════════════════════════════════════════════════════════════════
 // DAILY BRIEFING (cross-domain convenience tool)
@@ -108,7 +112,7 @@ registerNotesResources(server);
 
 server.registerTool("daily_briefing", {
   title: "Daily Briefing",
-  description: "Get a complete daily briefing: today's calendar events, due/overdue reminders, flagged/unread emails across all configured mail accounts, and recently modified notes. Each email includes a body preview. When presenting the briefing: (1) Group emails by account. (2) Use the preview field to accurately describe each email — never guess from the subject line. (3) Call mail_get_email for any email you want to summarize in detail. Use when: morning review, getting a quick overview of the day",
+  description: "Get a complete daily briefing: today's calendar events, due/overdue reminders, flagged/unread emails across all configured mail accounts, recently modified notes, and unread texts. Each email includes a body preview. When presenting the briefing: (1) Group emails by account. (2) Use the preview field to accurately describe each email — never guess from the subject line. (3) Call mail_get_email for any email you want to summarize in detail. Use when: morning review, getting a quick overview of the day",
   inputSchema: z.object({
     response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
   }).strict(),
@@ -138,6 +142,10 @@ server.registerTool("daily_briefing", {
       count: z.number(),
       items: z.array(NoteSummaryZ),
     }),
+    texts: z.object({
+      unreadCount: z.number(),
+      unread: z.array(MessageInChatZ),
+    }).optional(),
     errors: z.array(z.string()).optional(),
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -161,6 +169,16 @@ server.registerTool("daily_briefing", {
 
     // Mail: fetch per account
     const errors: string[] = [];
+
+    // Texts: unread count and the newest five
+    let texts: Awaited<ReturnType<typeof messages.unreadSummary>> | undefined;
+    if (isMessagesEnabled()) {
+      try {
+        texts = await messages.unreadSummary(5);
+      } catch (e) {
+        errors.push(`texts: ${sanitizeErrorMessage(e instanceof Error ? e.message : String(e))}`);
+      }
+    }
     let accounts: mail.Account[] = [];
     try {
       accounts = await mail.listAccounts();
@@ -224,6 +242,7 @@ server.registerTool("daily_briefing", {
         count: notesResult.items.length,
         items: notesResult.items,
       },
+      ...(texts ? { texts } : {}),
       ...(errors.length > 0 ? { errors } : {}),
     };
 
