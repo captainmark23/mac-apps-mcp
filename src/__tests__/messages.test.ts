@@ -185,9 +185,9 @@ describe("messages config", () => {
 
 const APPLE_EPOCH = 978307200;
 
-/** Nanoseconds since 2001 for a Unix time, as an exact SQL literal. */
-function ns(unixSec: number): string {
-  return (BigInt(unixSec - APPLE_EPOCH) * 1_000_000_000n).toString();
+/** Nanoseconds since 2001 for a Unix time (plus extra ns), as an exact SQL literal. */
+function ns(unixSec: number, extraNs = 0): string {
+  return (BigInt(unixSec - APPLE_EPOCH) * 1_000_000_000n + BigInt(extraNs)).toString();
 }
 
 const T0 = Date.UTC(2026, 9, 20, 12, 0, 0) / 1000; // 2026-10-20T12:00:00Z
@@ -208,15 +208,16 @@ CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, transfer_name TEXT, mime_typ
 CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
 
 INSERT INTO handle VALUES (1, '+14155550101', 'iMessage'), (2, 'friend@example.com', 'iMessage'),
-  (3, '+14155550199', 'SMS'), (4, '+447700900123', 'iMessage');
+  (3, '+14155550199', 'SMS'), (4, '+447700900123', 'iMessage'), (5, '+14155550105', 'iMessage');
 
 INSERT INTO chat VALUES
   (1, 'any;-;+14155550101', 45, '+14155550101', 'iMessage', NULL, 0),
   (2, 'any;+;chat100', 43, 'chat100', 'iMessage', 'Test Group', 0),
   (3, 'any;-;+14155550199', 45, '+14155550199', 'SMS', NULL, 2),
-  (4, 'any;-;+447700900123', 45, '+447700900123', 'iMessage', NULL, 0);
+  (4, 'any;-;+447700900123', 45, '+447700900123', 'iMessage', NULL, 0),
+  (5, 'any;-;+14155550105', 45, '+14155550105', 'iMessage', NULL, 0);
 
-INSERT INTO chat_handle_join VALUES (1, 1), (2, 1), (2, 2), (3, 3), (4, 4);
+INSERT INTO chat_handle_join VALUES (1, 1), (2, 1), (2, 2), (3, 3), (4, 4), (5, 5);
 
 INSERT INTO message (ROWID, guid, text, attributedBody, handle_id, service, date, is_from_me, is_read, is_sent, is_delivered,
   item_type, associated_message_type, associated_message_guid, associated_message_emoji, cache_has_attachments, date_edited) VALUES
@@ -232,10 +233,12 @@ INSERT INTO message (ROWID, guid, text, attributedBody, handle_id, service, date
   (10, 'G10', 'Old message', NULL, 1, 'iMessage', 600000000, 0, 1, 0, 0, 0, 0, NULL, NULL, 0, 0),
   (11, 'G11', char(65532), NULL, 2, 'iMessage', ${ns(T0 + 50)}, 0, 1, 0, 0, 0, 0, NULL, NULL, 1, 0),
   (12, 'G12', 'Hello from London', NULL, 4, 'iMessage', ${ns(T0 - 3600)}, 0, 1, 0, 0, 0, 0, NULL, NULL, 0, 0),
-  (13, 'G13', NULL, NULL, 2, 'iMessage', ${ns(T0 + 55)}, 0, 1, 0, 0, 0, 2006, 'p:0/G11', char(127881), 0, 0);
+  (13, 'G13', NULL, NULL, 2, 'iMessage', ${ns(T0 + 55)}, 0, 1, 0, 0, 0, 2006, 'p:0/G11', char(127881), 0, 0),
+  (14, 'G14', 'Same millisecond A', NULL, 5, 'iMessage', ${ns(T0 - 7200, 123_100_000)}, 0, 1, 0, 0, 0, 0, NULL, NULL, 0, 0),
+  (15, 'G15', 'Same millisecond B', NULL, 5, 'iMessage', ${ns(T0 - 7200, 123_900_000)}, 0, 1, 0, 0, 0, 0, NULL, NULL, 0, 0);
 
 INSERT INTO chat_message_join (chat_id, message_id, message_date)
-  SELECT CASE WHEN ROWID IN (1, 2, 3, 10) THEN 1 WHEN ROWID = 9 THEN 3 WHEN ROWID = 12 THEN 4 ELSE 2 END, ROWID, date FROM message;
+  SELECT CASE WHEN ROWID IN (1, 2, 3, 10) THEN 1 WHEN ROWID = 9 THEN 3 WHEN ROWID = 12 THEN 4 WHEN ROWID IN (14, 15) THEN 5 ELSE 2 END, ROWID, date FROM message;
 
 INSERT INTO attachment VALUES (1, 'photo.jpg', 'image/jpeg', 1234);
 INSERT INTO message_attachment_join VALUES (11, 1);
@@ -257,8 +260,8 @@ describe("Messages queries (fixture chat.db)", () => {
 
   it("lists chats newest first, without junk, with participants, unread and last message", async () => {
     const { total, chats } = await db.listChats(path, 10, 0);
-    assert.equal(total, 3);
-    assert.deepEqual(chats.map((c) => c.chatIdentifier), ["+14155550101", "chat100", "+447700900123"]);
+    assert.equal(total, 4);
+    assert.deepEqual(chats.map((c) => c.chatIdentifier), ["+14155550101", "chat100", "+447700900123", "+14155550105"]);
 
     const [oneToOne, group] = chats;
     assert.equal(oneToOne.isGroup, false);
@@ -280,7 +283,7 @@ describe("Messages queries (fixture chat.db)", () => {
     const recent = await db.listChats(path, 10, 0, (T0 + 100) * 1000);
     assert.deepEqual(recent.chats.map((c) => c.chatIdentifier), ["+14155550101"]);
     const page2 = await db.listChats(path, 1, 1);
-    assert.equal(page2.total, 3);
+    assert.equal(page2.total, 4);
     assert.deepEqual(page2.chats.map((c) => c.chatIdentifier), ["chat100"]);
   });
 
@@ -315,6 +318,16 @@ describe("Messages queries (fixture chat.db)", () => {
     assert.deepEqual(older.messages.map((m) => m.id), [10, 1]);
     const window = await db.getChatMessages(path, [1], 10, undefined, T0 * 1000);
     assert.deepEqual(window.messages.map((m) => m.id), [2, 3]);
+  });
+
+  it("pages by message id without skipping messages in the same millisecond", async () => {
+    const first = await db.getChatMessages(path, [5], 1);
+    assert.deepEqual(first.messages.map((m) => m.id), [15]);
+    assert.equal(first.hasMore, true);
+    assert.equal(first.messages[0].dateMs, (T0 - 7200) * 1000 + 123);
+    const second = await db.getChatMessages(path, [5], 1, undefined, undefined, 15);
+    assert.deepEqual(second.messages.map((m) => m.id), [14]);
+    assert.equal(second.hasMore, false);
   });
 
   it("lists unread incoming messages, excluding junk", async () => {
@@ -363,7 +376,7 @@ describe("Messages queries (fixture chat.db)", () => {
   });
 
   it("finds own messages sent after a given row", async () => {
-    assert.equal(await db.maxMessageId(path), 13);
+    assert.equal(await db.maxMessageId(path), 15);
     const sent = await db.findSentAfter(path, ["+14155550101"], 1);
     assert.deepEqual(sent.map((r) => [r.id, r.text, r.isSent, r.isDelivered]), [[2, "mac-apps-mcp test 1", true, true]]);
     assert.deepEqual(await db.findSentAfter(path, ["+14155550101"], 2), []);

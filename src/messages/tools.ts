@@ -146,8 +146,9 @@ export async function getChat(
   ref: { chatIdentifier?: string; chatId?: number },
   limit = 50,
   before?: string,
-  after?: string
-): Promise<{ chat: ChatOut; count: number; has_more: boolean; next_before?: string; messages: MessageOut[] }> {
+  after?: string,
+  beforeId?: number
+): Promise<{ chat: ChatOut; count: number; has_more: boolean; next_before_id?: number; messages: MessageOut[] }> {
   if ((ref.chatIdentifier == null) === (ref.chatId == null)) {
     throw new Error("Give exactly one of chat_identifier or chat_id.");
   }
@@ -158,7 +159,7 @@ export async function getChat(
   if (chats.length === 0) throw new Error("Chat not found. Use messages_list_chats to find its chat_identifier.");
 
   const [page, names] = await Promise.all([
-    db.getChatMessages(path, chats.map((c) => c.id), limit, parseIsoMs(before, "before"), parseIsoMs(after, "after")),
+    db.getChatMessages(path, chats.map((c) => c.id), limit, parseIsoMs(before, "before"), parseIsoMs(after, "after"), beforeId),
     getHandleNameMap(),
   ]);
   const messages = page.messages.map((m) => messageOut(m, names));
@@ -173,7 +174,7 @@ export async function getChat(
     chat,
     count: messages.length,
     has_more: page.hasMore,
-    ...(page.hasMore && messages.length > 0 ? { next_before: messages[0].date } : {}),
+    ...(page.hasMore && messages.length > 0 ? { next_before_id: messages[0].id } : {}),
     messages,
   };
 }
@@ -296,8 +297,8 @@ export async function sendMessage(
   const deadline = Date.now() + SEND_CONFIRM_MS;
   let row: db.SentRow | undefined;
   while (Date.now() < deadline) {
-    const rows = await db.findSentAfter(path, identifiers, before);
-    row = rows.find((r) => r.text === wanted) ?? rows[0];
+    // Only the row with our text counts: another send to the same chat may land first.
+    row = (await db.findSentAfter(path, identifiers, before)).find((r) => r.text === wanted);
     if (row && (row.error !== 0 || row.isSent || row.isDelivered)) break;
     await new Promise((r) => setTimeout(r, SEND_POLL_MS));
   }

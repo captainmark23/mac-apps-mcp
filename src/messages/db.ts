@@ -345,19 +345,24 @@ export async function findChats(
 
 /**
  * The newest `limit` visible messages in the given chats within (afterMs, beforeMs),
- * returned oldest first with attachments and folded tapbacks.
+ * returned oldest first with attachments and folded tapbacks. `beforeId` pages
+ * back from that message in the same (raw date, ROWID) order as the query, so
+ * messages sharing a millisecond are not skipped.
  */
 export async function getChatMessages(
   db: string,
   chatIds: number[],
   limit: number,
   beforeMs?: number,
-  afterMs?: number
+  afterMs?: number,
+  beforeId?: number
 ): Promise<{ messages: MessageRow[]; hasMore: boolean }> {
   if (chatIds.length === 0) return { messages: [], hasMore: false };
+  const cursorDate = beforeId != null ? `(SELECT date FROM message WHERE ROWID = ${safeInt(beforeId)})` : "";
   const bounds = [
     beforeMs != null ? `AND ${dateMsSql("m.date")} < ${safeInt(beforeMs)}` : "",
     afterMs != null ? `AND ${dateMsSql("m.date")} > ${safeInt(afterMs)}` : "",
+    beforeId != null ? `AND (m.date < ${cursorDate} OR (m.date = ${cursorDate} AND m.ROWID < ${safeInt(beforeId)}))` : "",
   ].join(" ");
   const rows = await sqliteQuery(db,
     `SELECT ${await messageSelect(db)}

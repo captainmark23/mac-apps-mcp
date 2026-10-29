@@ -72,26 +72,27 @@ export function registerMessagesTools(server: McpServer): void {
 
   server.registerTool("messages_get_chat", {
     title: "Get Message Chat",
-    description: "Messages in one chat, oldest first, with tapbacks folded into the message they react to. Returns the newest `limit` messages; page back with before = next_before. Use when: reading a conversation",
+    description: "Messages in one chat, oldest first, with tapbacks folded into the message they react to. Returns the newest `limit` messages; page back with before_id = next_before_id. Use when: reading a conversation",
     inputSchema: z.object({
       chat_identifier: z.string().max(500).optional().describe("Phone, email or group id from messages_list_chats"),
       chat_id: z.number().optional().describe("chatId from messages_list_chats"),
       limit: z.number().min(1).max(500).default(50).describe("Max messages to return"),
       before: isoDateString.optional().describe("Only messages before this ISO 8601 date"),
       after: isoDateString.optional().describe("Only messages after this ISO 8601 date"),
+      before_id: z.number().optional().describe("Only messages older than this message id (next_before_id from the previous page)"),
       response_format: z.enum(["json", "markdown"]).default("json").describe("Output format: 'json' for structured data, 'markdown' for human-readable text"),
     }).strict(),
     outputSchema: {
       chat: ChatZ,
       count: z.number(),
       has_more: z.boolean(),
-      next_before: z.string().optional(),
+      next_before_id: z.number().optional(),
       messages: z.array(MessageZ),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, async ({ chat_identifier, chat_id, limit, before, after, response_format }) => {
+  }, async ({ chat_identifier, chat_id, limit, before, after, before_id, response_format }) => {
     try {
-      const result = await messages.getChat({ chatIdentifier: chat_identifier, chatId: chat_id }, limit, before, after);
+      const result = await messages.getChat({ chatIdentifier: chat_identifier, chatId: chat_id }, limit, before, after, before_id);
       return ok(result, true, response_format);
     } catch (e) { return err(e); }
   });
