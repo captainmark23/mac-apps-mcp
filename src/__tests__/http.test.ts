@@ -8,7 +8,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { hashPassword, verifyPassword } from "../transport/password.js";
-import { isAllowedRedirectUri } from "../transport/oauth.js";
+import { ConnectorAuth, isAllowedRedirectUri } from "../transport/oauth.js";
 import { applyToolsets, createHttpApp, toolModule } from "../transport/http.js";
 import { getHttpToolsets, getPublicUrl, getTransport } from "../shared/config.js";
 
@@ -364,5 +364,40 @@ describe("HTTP connector (loopback)", () => {
     const locked = await login(requestId, PASSWORD);
     assert.equal(locked.status, 429);
     assert.match(await locked.text(), /Try again in 15 minutes/);
+  });
+});
+
+describe("client registration cap", () => {
+  let dir: string;
+  before(() => { dir = mkdtempSync(join(tmpdir(), "macos-mcp-cap-")); });
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  /** 50 stored clients, c0 oldest; those `granted` picks hold an unexpired refresh token. */
+  function fullAuth(granted: (i: number) => boolean): ConnectorAuth {
+    const clients: Record<string, object> = {};
+    const refresh: Record<string, object> = {};
+    for (let i = 0; i < 50; i++) {
+      clients[`c${i}`] = { client_id: `c${i}`, client_id_issued_at: 1000 + i, redirect_uris: [HOSTED] };
+      if (granted(i)) refresh[`h${i}`] = { clientId: `c${i}`, scopes: ["mcp"], expiresAt: Date.now() + 60_000 };
+    }
+    const stateFile = join(dir, `${randomBytes(4).toString("hex")}.json`);
+    writeFileSync(stateFile, JSON.stringify({ clients, codes: {}, access: {}, refresh }));
+    return new ConnectorAuth({ stateFile, passwordHash: "unused", resource: new URL("https://mac.example:8443/mcp") });
+  }
+
+  const newClient = { client_id: "new", client_id_issued_at: 2000, redirect_uris: [HOSTED] };
+
+  it("makes room by dropping the oldest client that is not signed in", async () => {
+    const auth = fullAuth((i) => i < 3);
+    await auth.clientsStore.registerClient!(newClient);
+    for (const id of ["c0", "c1", "c2", "new"]) assert.ok(await auth.clientsStore.getClient(id), id);
+    assert.equal(await auth.clientsStore.getClient("c3"), undefined);
+  });
+
+  it("refuses registration rather than sign anyone out", async () => {
+    const auth = fullAuth(() => true);
+    await assert.rejects(async () => auth.clientsStore.registerClient!(newClient), { errorCode: "too_many_requests" });
+    assert.equal(await auth.clientsStore.getClient("new"), undefined);
+    assert.ok(await auth.clientsStore.getClient("c0"));
   });
 });

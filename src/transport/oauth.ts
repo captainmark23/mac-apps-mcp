@@ -25,6 +25,7 @@ import {
   InvalidScopeError,
   InvalidTargetError,
   InvalidTokenError,
+  TooManyRequestsError,
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { verifyPassword } from "./password.js";
 
@@ -34,7 +35,11 @@ const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const MAX_FAILURES = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
-/** Registration is public, so cap stored clients; the oldest is dropped first. */
+/**
+ * Registration is public, so cap stored clients. At the cap only the oldest
+ * client with no unexpired code or token makes room; grants need the
+ * password, so registering alone can never sign anyone out.
+ */
 const MAX_CLIENTS = 50;
 
 /** claude.ai, Desktop, mobile and Cowork; the claude.com form is announced as a future move. */
@@ -154,11 +159,12 @@ export class ConnectorAuth implements OAuthServerProvider {
         if (rejected !== undefined || client.redirect_uris.length === 0) {
           throw new InvalidClientMetadataError(`Redirect URI not allowed: ${rejected ?? "(none)"}`);
         }
-        const ids = Object.keys(this.state.clients);
-        if (ids.length >= MAX_CLIENTS) {
-          const oldest = ids.sort((a, b) =>
-            (this.state.clients[a].client_id_issued_at ?? 0) - (this.state.clients[b].client_id_issued_at ?? 0))[0];
-          this.dropClient(oldest);
+        if (Object.keys(this.state.clients).length >= MAX_CLIENTS) {
+          const spare = this.oldestUngrantedClient();
+          if (!spare) {
+            throw new TooManyRequestsError("Client limit reached. Sign out unused clients, then connect again.");
+          }
+          delete this.state.clients[spare];
         }
         this.state.clients[client.client_id] = client;
         this.save();
@@ -168,13 +174,18 @@ export class ConnectorAuth implements OAuthServerProvider {
     };
   }
 
-  private dropClient(clientId: string): void {
-    delete this.state.clients[clientId];
+  private oldestUngrantedClient(): string | undefined {
+    const now = Date.now();
+    const granted = new Set<string>();
     for (const table of [this.state.codes, this.state.access, this.state.refresh]) {
-      for (const [key, grant] of Object.entries(table)) {
-        if (grant.clientId === clientId) delete table[key];
+      for (const grant of Object.values(table)) {
+        if (grant.expiresAt > now) granted.add(grant.clientId);
       }
     }
+    return Object.keys(this.state.clients)
+      .filter((id) => !granted.has(id))
+      .sort((a, b) =>
+        (this.state.clients[a].client_id_issued_at ?? 0) - (this.state.clients[b].client_id_issued_at ?? 0))[0];
   }
 
   // ─── Authorization (password page) ───────────────────────────
