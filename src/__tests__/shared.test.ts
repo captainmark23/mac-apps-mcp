@@ -962,6 +962,13 @@ describe("needsConfirmation", () => {
     assert.ok(result!.content[0].text.includes("confirm: true"));
   });
 
+  it("flags the warning as an error so output-schema validation does not replace it", () => {
+    process.env.MACOS_MCP_CONFIRM_DESTRUCTIVE = "true";
+    const result = needsConfirmation(false, "mail_send", "This will send an email.");
+    assert.equal(result?.isError, true);
+    assert.ok(result?.structuredContent.warning);
+  });
+
   it("includes the description in the warning", () => {
     process.env.MACOS_MCP_CONFIRM_DESTRUCTIVE = "true";
     const result = needsConfirmation(false, "test_tool", "This will delete everything.");

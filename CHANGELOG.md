@@ -14,9 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `macos://messages/chats` resource and a texts section in `daily_briefing`
 - `MACOS_MCP_MESSAGES` switch and `MACOS_MCP_MESSAGES_HANDLES_ALLOWLIST` for `messages_send`
 - Contact name lookup across every address book source, matching phone numbers in E.164
+- Remote connector: Streamable HTTP transport (`MACOS_MCP_TRANSPORT=http`) bound to loopback, with a single-user OAuth 2.1 server (dynamic client registration limited to Claude's callbacks, PKCE, rotating refresh tokens, login lockout), `/healthz`, per-module toolsets and an audit log of tool calls
+- `npm run set-password`, `scripts/install-launchd.sh`, `scripts/uninstall-launchd.sh` and `docs/connector-runbook.md`
 
 ### Changed
 - README tool count corrected to 46, including the Notes tools
+- Server construction moved to `src/server.ts` so both transports build the same server
+
+### Fixed
+- With `MACOS_MCP_CONFIRM_DESTRUCTIVE` on, the confirmation warning is returned as a tool error; before, it failed output-schema validation and the client saw a validation error instead
 
 ## [0.2.0] - 2026-03-18
 

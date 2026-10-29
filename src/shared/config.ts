@@ -163,6 +163,53 @@ export function getMessagesDbPath(): string {
   return dbPath;
 }
 
+// ─── HTTP Connector Configuration ────────────────────────────────
+
+/** MACOS_MCP_TRANSPORT: "stdio" (default) or "http". */
+export function getTransport(): "stdio" | "http" {
+  return (process.env.MACOS_MCP_TRANSPORT || "").trim().toLowerCase() === "http" ? "http" : "stdio";
+}
+
+/** MACOS_MCP_HTTP_PORT: loopback port for the HTTP connector (default 8443, a Funnel port). */
+export function getHttpPort(): number {
+  const port = parseInt(process.env.MACOS_MCP_HTTP_PORT || "8443", 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid MACOS_MCP_HTTP_PORT: ${process.env.MACOS_MCP_HTTP_PORT}`);
+  }
+  return port;
+}
+
+/**
+ * MACOS_MCP_PUBLIC_URL: the public origin clients reach (e.g. the Funnel URL).
+ * Used as the OAuth issuer; the MCP endpoint and resource identifier is <url>/mcp.
+ */
+export function getPublicUrl(): URL {
+  const val = process.env.MACOS_MCP_PUBLIC_URL;
+  if (!val) throw new Error("MACOS_MCP_PUBLIC_URL is required for the HTTP transport.");
+  const url = new URL(val);
+  if (url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("MACOS_MCP_PUBLIC_URL must be an origin with no path, e.g. https://host.example.ts.net:8443");
+  }
+  return url;
+}
+
+/**
+ * MACOS_MCP_HTTP_TOOLSETS: modules exposed over HTTP, e.g. "mail:read,messages".
+ * Modules: mail, calendar, reminders, contacts, notes, messages, briefing.
+ * A ":read" suffix keeps only that module's read-only tools. Unset means all.
+ */
+export function getHttpToolsets(): Map<string, "all" | "read"> | null {
+  const val = process.env.MACOS_MCP_HTTP_TOOLSETS;
+  if (!val || !val.trim()) return null;
+  const sets = new Map<string, "all" | "read">();
+  for (const entry of val.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)) {
+    const [module, mode] = entry.split(":");
+    if (mode && mode !== "read") throw new Error(`Invalid MACOS_MCP_HTTP_TOOLSETS entry: ${entry}`);
+    sets.set(module, mode === "read" ? "read" : "all");
+  }
+  return sets;
+}
+
 // ─── Mail DB Auto-Detection ──────────────────────────────────────
 
 let _mailDbPath: string | null = null;

@@ -12,6 +12,7 @@ MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders
 - **Apple Messages**: list chats, read conversations with tapbacks folded in, see unread texts, search, and send iMessage or SMS
 - **Daily briefing** — one-call summary of today's events, due reminders, unread mail and unread texts
 - **MCP resources** — browsable resources for accounts, calendars, lists, and contacts
+- **Remote connector**: optional Streamable HTTP transport with OAuth, so Claude on the web and phone can reach your Mac (see [docs/connector-runbook.md](docs/connector-runbook.md))
 - **Zero native dependencies** — uses macOS system `sqlite3` binary and JXA
 
 ## Requirements
@@ -72,6 +73,11 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `MACOS_MCP_READONLY` | Disable all write tools (`true` or `1`) | Not set (all tools) |
 | `MACOS_MCP_CONFIRM_DESTRUCTIVE` | Require `confirm: true` on destructive tools (`true` or `1`) | Not set |
 | `MACOS_MCP_MESSAGES` | Messages module and the texts section of `daily_briefing` (`off` to disable) | `on` |
+| `MACOS_MCP_TRANSPORT` | `stdio`, or `http` for the remote connector | `stdio` |
+| `MACOS_MCP_HTTP_PORT` | Loopback port for the HTTP transport | 8443 |
+| `MACOS_MCP_PUBLIC_URL` | Public origin of the connector, no path (required for `http`); the MCP endpoint is `<url>/mcp` | Not set |
+| `MACOS_MCP_HTTP_TOOLSETS` | Modules exposed over HTTP, e.g. `mail:read,messages`; `:read` keeps only read-only tools | All |
+| `MACOS_MCP_OAUTH_PASSWORD_HASH` | Connector password hash, overriding `~/.macos-mcp/oauth-password` from `npm run set-password` | Not set |
 | `MACOS_MCP_MESSAGES_HANDLES_ALLOWLIST` | Comma-separated phone numbers or emails `messages_send` may text (`*` wildcards allowed); every participant of a group must match | Not set (any) |
 
 ### Read-Only Mode
@@ -205,6 +211,19 @@ Reads come from `~/Library/Messages/chat.db`, so the process needs Full Disk Acc
 |---|---|
 | `daily_briefing` | Today's events, due/overdue reminders, flagged and unread emails, unread texts |
 
+## Remote Connector (HTTP)
+
+With `MACOS_MCP_TRANSPORT=http` the server speaks Streamable HTTP on `127.0.0.1` and acts as its own OAuth 2.1 authorization server, so it can be added to claude.ai as a custom connector:
+
+1. Single user: one password, stored as a scrypt hash by `npm run set-password`. Five wrong attempts lock sign-in for 15 minutes.
+2. Dynamic client registration accepts only Claude's callback (`https://claude.ai/api/mcp/auth_callback`, and the `claude.com` form) and loopback `/callback` URLs for Claude Code.
+3. PKCE (S256) is required. Access tokens last 1 hour; refresh tokens 30 days and rotate on use. Only token hashes are stored, in `~/.macos-mcp/auth.json` (0600).
+4. Every tool call is logged to `~/.macos-mcp/audit.log` with the client, tool and a hash of the arguments, never the arguments.
+5. `/healthz` reports version, uptime and whether the Mail and Messages databases are readable, and nothing else.
+6. MCP resources are not exposed over HTTP; tools cover the same data and are audited.
+
+Expose it with a tunnel such as Tailscale Funnel. [docs/connector-runbook.md](docs/connector-runbook.md) covers install, the LaunchAgent (`scripts/install-launchd.sh`), Funnel, adding the connector, password rotation and Full Disk Access.
+
 ## Resources
 
 The server exposes browsable MCP resources:
@@ -239,7 +258,13 @@ The index is stored at `~/.macos-mcp/mail-fts.db`. Clients that support progress
 
 ```
 src/
-  index.ts              # MCP server — tool/resource registration and routing
+  index.ts              # Entry point: logging, transport choice, FTS auto-index
+  server.ts             # Builds the MCP server (all tools, resources, daily briefing)
+  transport/
+    http.ts             # Streamable HTTP transport, health, toolsets, audit log
+    oauth.ts            # Single-user OAuth 2.1 provider and sign-in page
+    password.ts         # scrypt password hashing
+    set-password.ts     # npm run set-password
   mail/
     tools.ts            # Mail reads (SQLite) and writes (JXA)
     fts.ts              # FTS5 full-text body search index
