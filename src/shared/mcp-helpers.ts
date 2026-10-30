@@ -141,16 +141,23 @@ export const confirmParam = z.boolean().default(false).describe(
  * Check if a destructive tool should proceed.
  * Returns a warning response if confirmation is required but not provided,
  * or null if the tool should proceed normally.
+ *
+ * The warning is flagged isError: the SDK validates successful results
+ * against each tool's output schema, which a bare `{ warning }` fails, so
+ * without the flag the client saw a validation error instead of the warning.
  */
 export function needsConfirmation(
   confirm: boolean,
   toolName: string,
   description: string
-): ReturnType<typeof ok> | null {
+): (ReturnType<typeof ok> & { isError: true }) | null {
   if (!isConfirmDestructive() || confirm) return null;
-  return ok({
-    warning: `Action "${toolName}" requires confirmation. ${description} Please check with the user, then call again with confirm: true.`,
-  });
+  return {
+    ...ok({
+      warning: `Action "${toolName}" requires confirmation. ${description} Please check with the user, then call again with confirm: true.`,
+    }),
+    isError: true,
+  };
 }
 
 /** Common output schemas for simple responses. */
