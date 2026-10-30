@@ -135,6 +135,34 @@ export function getNotesDbPath(): string {
   return _notesDbPath;
 }
 
+// ─── Messages Configuration ──────────────────────────────────────
+
+/** Messages module switch. MACOS_MCP_MESSAGES=off|false|0 disables it; on by default. */
+export function isMessagesEnabled(): boolean {
+  const val = (process.env.MACOS_MCP_MESSAGES || "").trim().toLowerCase();
+  return !(val === "off" || val === "false" || val === "0");
+}
+
+/**
+ * Handles messages_send may text, from MACOS_MCP_MESSAGES_HANDLES_ALLOWLIST
+ * (comma-separated phone numbers or emails, `*` wildcards allowed).
+ * Returns null when unset, meaning any recipient.
+ */
+export function getMessagesHandlesAllowlist(): string[] | null {
+  const val = process.env.MACOS_MCP_MESSAGES_HANDLES_ALLOWLIST;
+  if (!val) return null;
+  const handles = val.split(",").map((s) => s.trim()).filter(Boolean);
+  return handles.length > 0 ? handles : null;
+}
+
+export function getMessagesDbPath(): string {
+  const dbPath = join(homedir(), "Library/Messages/chat.db");
+  if (!existsSync(dbPath)) {
+    throw new Error("Messages database not found. Is Messages signed in, and does this process have Full Disk Access?");
+  }
+  return dbPath;
+}
+
 // ─── Mail DB Auto-Detection ──────────────────────────────────────
 
 let _mailDbPath: string | null = null;

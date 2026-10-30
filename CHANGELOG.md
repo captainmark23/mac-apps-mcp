@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Messages module: `messages_list_chats`, `messages_get_chat`, `messages_unread`, `messages_search` and `messages_send` (iMessage, SMS and RCS chats from `chat.db`, sending through Messages.app)
+- Text extraction from `attributedBody` blobs, so messages with a NULL `text` column read and search correctly
+- Tapbacks folded into the message they react to, including emoji tapbacks
+- `macos://messages/chats` resource and a texts section in `daily_briefing`
+- `MACOS_MCP_MESSAGES` switch and `MACOS_MCP_MESSAGES_HANDLES_ALLOWLIST` for `messages_send`
+- Contact name lookup across every address book source, matching phone numbers in E.164
+
+### Changed
+- README tool count corrected to 46, including the Notes tools
+
 ## [0.2.0] - 2026-03-18
 
 ### Fixed

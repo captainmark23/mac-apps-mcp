@@ -29,7 +29,7 @@ const ADDRESSBOOK_BASE = join(
  * Note: This heuristic could miss contacts from smaller secondary sources.
  * A future enhancement could query all sources and deduplicate.
  */
-function findContactsDb(): string {
+function listContactsDbs(): { path: string; size: number }[] {
   const sourcesDir = join(ADDRESSBOOK_BASE, "Sources");
   if (!existsSync(sourcesDir)) {
     throw new Error(
@@ -38,8 +38,7 @@ function findContactsDb(): string {
     );
   }
 
-  let bestPath = "";
-  let bestSize = 0;
+  const dbs: { path: string; size: number }[] = [];
 
   for (const src of readdirSync(sourcesDir)) {
     const srcDir = join(sourcesDir, src);
@@ -53,16 +52,25 @@ function findContactsDb(): string {
         if (/^AddressBook-v\d+\.abcddb$/.test(f)) {
           const dbPath = join(srcDir, f);
           try {
-            const { size } = statSync(dbPath);
-            if (size > bestSize) {
-              bestSize = size;
-              bestPath = dbPath;
-            }
+            dbs.push({ path: dbPath, size: statSync(dbPath).size });
           } catch { /* skip inaccessible db files */ }
         }
       }
     } catch (e) {
       process.stderr.write(`[contacts] Skipping unreadable source dir ${src}: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
+  }
+
+  return dbs;
+}
+
+function findContactsDb(): string {
+  let bestPath = "";
+  let bestSize = 0;
+  for (const { path, size } of listContactsDbs()) {
+    if (size > bestSize) {
+      bestSize = size;
+      bestPath = path;
     }
   }
 
@@ -352,4 +360,106 @@ export async function searchContacts(
   }));
 
   return paginateRows(items, total, offset);
+}
+
+// ─── Handle → Name Lookup (used by Messages) ─────────────────────
+
+/**
+ * Normalise a phone number or email to the form Messages stores handles in:
+ * lowercase email, or E.164 for phone numbers. Ten-digit numbers are taken as
+ * North American (+1). National numbers with a leading 0 carry no country
+ * code, so they come back as bare digits and only match by tail (see below).
+ */
+export function normalizeHandle(raw: string): string {
+  const s = raw.trim();
+  if (s.includes("@")) return s.toLowerCase();
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return s;
+  if (s.startsWith("+")) return `+${digits}`;
+  if (digits.startsWith("00")) return `+${digits.slice(2)}`;
+  if (digits.length === 10 && !/^[01]/.test(digits)) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return digits;
+}
+
+/** Digits compared when a contact number is national (leading 0) and the handle is E.164. */
+const NATIONAL_TAIL_DIGITS = 9;
+
+export function nationalTail(handle: string): string | null {
+  const digits = handle.replace(/\D/g, "");
+  return digits.length >= NATIONAL_TAIL_DIGITS ? digits.slice(-NATIONAL_TAIL_DIGITS) : null;
+}
+
+export interface HandleNameMap {
+  /** Contact name for a Messages handle, if any contact holds it. */
+  lookup(handle: string): string | undefined;
+  /** Handles (normalised) and national tails for contacts whose name contains `query`. */
+  handlesForName(query: string): { handles: string[]; tails: string[] };
+}
+
+/**
+ * Build a handle → contact name map across every AddressBook source, so
+ * Messages participants resolve even when they live in a smaller source
+ * (e.g. an Exchange account) than the one the contacts tools browse.
+ */
+export async function getHandleNameMap(): Promise<HandleNameMap> {
+  const exact = new Map<string, string>();
+  const byTail = new Map<string, string>();
+  const nameSql = `TRIM(COALESCE(r.ZFIRSTNAME,'') || ' ' || COALESCE(r.ZLASTNAME,''))`;
+
+  let dbs: { path: string }[] = [];
+  try {
+    dbs = listContactsDbs();
+  } catch { /* no Contacts database: handles stay unresolved */ }
+
+  const results = await Promise.all(dbs.map(({ path }) =>
+    sqliteQuery(
+      path,
+      `SELECT p.ZFULLNUMBER AS handle, ${nameSql} AS name, r.ZORGANIZATION AS org
+         FROM ZABCDPHONENUMBER p JOIN ZABCDRECORD r ON r.Z_PK = p.ZOWNER
+       UNION ALL
+       SELECT e.ZADDRESS AS handle, ${nameSql} AS name, r.ZORGANIZATION AS org
+         FROM ZABCDEMAILADDRESS e JOIN ZABCDRECORD r ON r.Z_PK = e.ZOWNER;`
+    ).catch((e) => {
+      process.stderr.write(`[contacts] Skipping source in handle map: ${e instanceof Error ? e.message : String(e)}\n`);
+      return [];
+    })
+  ));
+
+  for (const rows of results) {
+    for (const r of rows) {
+      const raw = String(r.handle || "");
+      const name = String(r.name || "") || String(r.org || "");
+      if (!raw || !name) continue;
+      const key = normalizeHandle(raw);
+      if (!exact.has(key)) exact.set(key, name);
+      if (!key.startsWith("+") && !key.includes("@") && key.startsWith("0")) {
+        const tail = nationalTail(key);
+        if (tail && !byTail.has(tail)) byTail.set(tail, name);
+      }
+    }
+  }
+
+  return {
+    lookup(handle: string) {
+      const key = normalizeHandle(handle);
+      const hit = exact.get(key);
+      if (hit || !key.startsWith("+")) return hit;
+      const tail = nationalTail(key);
+      return tail ? byTail.get(tail) : undefined;
+    },
+    handlesForName(query: string) {
+      const q = query.trim().toLowerCase();
+      const handles: string[] = [];
+      const tails: string[] = [];
+      if (!q) return { handles, tails };
+      for (const [key, name] of exact) {
+        if (name.toLowerCase().includes(q)) handles.push(key);
+      }
+      for (const [tail, name] of byTail) {
+        if (name.toLowerCase().includes(q)) tails.push(tail);
+      }
+      return { handles, tails };
+    },
+  };
 }
