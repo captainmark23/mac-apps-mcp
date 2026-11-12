@@ -240,13 +240,17 @@ async function resolveChat(
     if (!chat) throw new Error("Chat not found. Use whatsapp_list_chats to find its chat_id.");
     return chat;
   }
-  const wanted = ref.chatName!.trim().toLowerCase();
+  // Compare without the "~" that marks profile names, so a displayed name can be passed back.
+  const strip = (name: string) => name.replace(/~/g, "").trim().toLowerCase();
+  const wanted = strip(ref.chatName!);
   if (!wanted) throw new Error("chat_name is empty.");
-  const found = await db.findChats(path, {
-    name: ref.chatName!.trim(),
+  const plain = (c: db.ChatInfo) => strip(chatName(c, names));
+  const candidates = await db.findChats(path, {
+    name: wanted,
     jids: names.jidsForName(wanted).slice(0, MAX_NAME_MATCHES),
   });
-  const plain = (c: db.ChatInfo) => chatName(c, names).replace(/^~/, "").toLowerCase();
+  // Groups with no subject are all candidates; keep those whose member-based name matches.
+  const found = candidates.filter((c) => !(c.isGroup && !c.name) || plain(c).includes(wanted));
   const exact = found.filter((c) => plain(c) === wanted);
   const matches = exact.length > 0 ? exact : found;
   if (matches.length === 0) throw new Error(`No WhatsApp chat matches "${ref.chatName}". Use whatsapp_list_chats to find it.`);

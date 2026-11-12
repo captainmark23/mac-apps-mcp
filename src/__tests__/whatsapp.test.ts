@@ -268,9 +268,17 @@ describe("WhatsApp tools (fixture databases)", () => {
     assert.deepEqual(found.items.map((m) => [m.chat.name, m.sender.name]), [["Alice Example, ~Carol, Bob Sample +2", "~Carol"]]);
   });
 
+  it("accepts the names it displays: ~profile names and member-named groups", async () => {
+    assert.equal((await whatsapp.getChat({ chatName: "~Erin" }, 50, 0, undefined, paths)).chat.chatId, 6);
+    assert.equal((await whatsapp.getChat({ chatName: "Alice Example, ~Carol, Bob Sample +2" }, 50, 0, undefined, paths)).chat.chatId, 8);
+    assert.equal((await whatsapp.getChat({ chatName: "carol, bob" }, 50, 0, undefined, paths)).chat.chatId, 8);
+    const found = await whatsapp.searchMessages("subject", { chatName: "~Carol, Bob Sample" }, paths);
+    assert.deepEqual(found.items.map((m) => m.id), [15]);
+  });
+
   it("refuses an ambiguous or unknown chat reference", async () => {
     await assert.rejects(whatsapp.getChat({ chatName: "alice" }, 50, 0, undefined, paths),
-      /2 chats match "alice": Alice Example \(chat_id 1\); Alice Example fans \(chat_id 7\)/);
+      /3 chats match "alice": Alice Example \(chat_id 1\); Alice Example fans \(chat_id 7\); Alice Example, ~Carol, Bob Sample \+2 \(chat_id 8\)/);
     await assert.rejects(whatsapp.getChat({ chatName: "nobody" }, 50, 0, undefined, paths), /No WhatsApp chat matches/);
     await assert.rejects(whatsapp.getChat({ chatId: 99 }, 50, 0, undefined, paths), /Chat not found/);
     await assert.rejects(whatsapp.getChat({ chatId: 4 }, 50, 0, undefined, paths), /Chat not found/);

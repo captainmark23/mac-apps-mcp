@@ -188,8 +188,9 @@ export async function listChats(db: string, limit: number, offset: number): Prom
 }
 
 /**
- * Chats by id, or those whose stored name contains `name` or whose contact is
- * one of `jids`. Most recently active first.
+ * Chats by id, or the candidates for a name: those whose stored name contains
+ * `name`, one-to-one chats with one of `jids`, and every group with no
+ * subject (the caller names those by their members). Most recently active first.
  */
 export async function findChats(
   db: string,
@@ -201,11 +202,12 @@ export async function findChats(
   } else {
     const parts = [`s.ZPARTNERNAME LIKE '%${sqlLikeEscape(by.name)}%' ESCAPE '\\'`];
     if (by.jids.length > 0) parts.push(`(s.ZSESSIONTYPE = 0 AND s.ZCONTACTJID IN (${sqlList(by.jids)}))`);
+    parts.push("(s.ZSESSIONTYPE = 1 AND COALESCE(s.ZPARTNERNAME, '') = '')");
     match = `(${parts.join(" OR ")})`;
   }
   const rows = await sqliteQuery(db,
     `SELECT ${CHAT_COLUMNS} FROM ZWACHATSESSION s WHERE ${CHATS} AND ${match}
-      ORDER BY s.ZLASTMESSAGEDATE DESC, s.Z_PK DESC LIMIT 50;`);
+      ORDER BY s.ZLASTMESSAGEDATE DESC, s.Z_PK DESC LIMIT 1000;`);
   return attachMembers(db, rows.map(toChat));
 }
 
