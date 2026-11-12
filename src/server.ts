@@ -14,7 +14,8 @@ import { registerRemindersTools, registerRemindersResources, ReminderSummaryZ } 
 import { registerContactsTools, registerContactsResources } from "./contacts/register.js";
 import { registerNotesTools, registerNotesResources, NoteSummaryZ } from "./notes/register.js";
 import { registerMessagesTools, registerMessagesResources, MessageInChatZ } from "./messages/register.js";
-import { isMessagesEnabled } from "./shared/config.js";
+import { registerWhatsAppTools } from "./whatsapp/register.js";
+import { isMessagesEnabled, isWhatsAppEnabled } from "./shared/config.js";
 
 import * as mail from "./mail/tools.js";
 import * as calendar from "./calendar/tools.js";
@@ -40,6 +41,7 @@ export function createServer(opts: { resources?: boolean } = {}): McpServer {
   registerContactsTools(server);
   registerNotesTools(server);
   if (isMessagesEnabled()) registerMessagesTools(server);
+  if (isWhatsAppEnabled()) registerWhatsAppTools(server);
 
   if (opts.resources !== false) {
     registerMailResources(server);

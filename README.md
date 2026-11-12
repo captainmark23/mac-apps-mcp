@@ -1,6 +1,6 @@
 # mac-apps-mcp
 
-MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders, Contacts, Notes and Messages. All reads hit SQLite databases directly for instant results — no slow AppleScript round-trips.
+MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders, Contacts, Notes, Messages and WhatsApp. All reads hit SQLite databases directly for instant results — no slow AppleScript round-trips.
 
 ## Features
 
@@ -10,6 +10,7 @@ MCP server for macOS that gives Claude access to Apple Mail, Calendar, Reminders
 - **Apple Reminders** — list, query, create, complete, delete reminders
 - **Apple Contacts** — list, search, and get full contact details from the Address Book
 - **Apple Messages**: list chats, read conversations with tapbacks folded in, see unread texts, search, and send iMessage or SMS
+- **WhatsApp** (read-only): list chats, read conversations with each sender named, see unread messages and search
 - **Daily briefing** — one-call summary of today's events, due reminders, unread mail and unread texts
 - **MCP resources** — browsable resources for accounts, calendars, lists, and contacts
 - **Remote connector**: optional Streamable HTTP transport with OAuth, so Claude on the web and phone can reach your Mac (see [docs/connector-runbook.md](docs/connector-runbook.md))
@@ -72,6 +73,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `MACOS_MCP_WRITE_RATE_LIMIT` | Max write operations per minute | 10 |
 | `MACOS_MCP_READONLY` | Disable all write tools (`true` or `1`) | Not set (all tools) |
 | `MACOS_MCP_CONFIRM_DESTRUCTIVE` | Require `confirm: true` on destructive tools (`true` or `1`) | Not set |
+| `MACOS_MCP_WHATSAPP` | WhatsApp module (`off` to disable) | `on` |
 | `MACOS_MCP_MESSAGES` | Messages module and the texts section of `daily_briefing` (`off` to disable) | `on` |
 | `MACOS_MCP_TRANSPORT` | `stdio`, or `http` for the remote connector | `stdio` |
 | `MACOS_MCP_HTTP_PORT` | Loopback port for the HTTP transport | 8443 |
@@ -122,7 +124,7 @@ To require explicit confirmation before destructive actions (sending email, dele
 
 When enabled, destructive tools (`mail_send`, `mail_reply`, `mail_forward`, `messages_send`, `calendar_delete_event`, `reminders_delete`) require a `confirm: true` parameter. If omitted, the tool returns a warning asking the LLM to check with the user first. For `mail_reply` and `mail_forward`, confirmation is only required when `send: true` (the default) — saving as draft does not require confirmation.
 
-## Tools (46)
+## Tools (50)
 
 ### Mail (12)
 
@@ -206,6 +208,24 @@ When enabled, destructive tools (`mail_send`, `mail_reply`, `mail_forward`, `mes
 
 Reads come from `~/Library/Messages/chat.db`, so the process needs Full Disk Access. Participants are named from Contacts across every address book source. `messages_send` refuses a recipient with no existing chat and no matching contact unless called with `confirm: true`, and reports what `chat.db` shows after the send (`sent`, `delivered`, `failed`, or `unknown` if the row has not appeared). Messages cannot mark chats read through scripting, so there is no mark-read tool.
 
+### WhatsApp (4)
+
+| Tool | Description |
+|---|---|
+| `whatsapp_list_chats` | Recent chats and groups, newest first, with unread count and last message preview |
+| `whatsapp_get_chat` | Messages in one chat (by `chat_id` or name), newest first, each with its individual sender |
+| `whatsapp_search` | Search message text and captions, optionally limited to one chat or one person |
+| `whatsapp_unread` | Unread incoming messages across chats and groups |
+
+Read-only: there is no send tool, and nothing is written to WhatsApp's files.
+
+1. **Source.** The WhatsApp desktop app's local history at `~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite`, opened read-only. The process needs Full Disk Access.
+2. **Keeping it current.** The tools see only what the app has stored on this Mac. WhatsApp must be installed, signed in (linked to your phone) and kept running here; `whatsapp_list_chats` and `whatsapp_unread` return `history_current_to`, the time of the newest stored message, so stale history is visible.
+3. **Names.** Senders are named from WhatsApp's copy of your address book, then the name they chose for their own WhatsApp profile (shown as `~Name`), then their phone number. WhatsApp identifies some people only by a privacy id with no phone number; those have an empty `phone`, and show as `Unknown` if they have no name either.
+4. **Scope.** One-to-one chats and groups. Channels, Status, broadcast lists and community announcement parents are left out. System events (joins, renames) are skipped.
+5. **Media.** Reported as a type and file name only, never content. Types not yet identified are labelled `other (type N)`.
+6. **Unread.** WhatsApp stores an unread count per chat, not per message, so `whatsapp_unread` returns that many of each chat's newest incoming messages.
+
 ### Briefing (1)
 
 | Tool | Description |
@@ -283,6 +303,9 @@ src/
     db.ts               # chat.db queries (SQLite)
     attributed-body.ts  # Text extraction from attributedBody blobs
     jxa.ts              # Sending through Messages.app (JXA)
+  whatsapp/
+    tools.ts            # WhatsApp tools (read-only): chats, unread, search; name lookup
+    db.ts               # ChatStorage.sqlite queries (SQLite)
   shared/
     sqlite.ts           # Zero-dep SQLite query helper (/usr/bin/sqlite3)
     applescript.ts       # JXA execution helper with rate-limited write queue
@@ -331,6 +354,12 @@ Write operations (sending mail, creating events/reminders) use JXA which require
 1. `Messages database not found` or `unable to open database file`: the process reading `~/Library/Messages/chat.db` needs Full Disk Access. When the server runs under launchd rather than Claude Desktop, grant it to the `node` binary that launchd starts.
 2. `Messages has no chat or participant for this recipient`: Messages scripting only exposes recent chats and known participants. Send the first message from Messages.app, then retry.
 3. `messages_search` matches plain letters case-insensitively but accented and non-Latin text case-sensitively.
+
+### WhatsApp
+
+1. `WhatsApp database not found`: WhatsApp for Mac is not installed, or has never been signed in on this Mac.
+2. `Cannot read the WhatsApp database`: the process needs Full Disk Access. When the server runs under launchd, grant it to the `node` binary that launchd starts.
+3. Recent messages missing: check `history_current_to`. If it is old, open WhatsApp on this Mac and make sure it is still linked to your phone.
 
 ### Reminders database not found
 

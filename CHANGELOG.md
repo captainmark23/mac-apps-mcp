@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Messages module: `messages_list_chats`, `messages_get_chat`, `messages_unread`, `messages_search` and `messages_send` (iMessage, SMS and RCS chats from `chat.db`, sending through Messages.app)
+- WhatsApp module, read-only: `whatsapp_list_chats`, `whatsapp_get_chat`, `whatsapp_search` and `whatsapp_unread`, reading the WhatsApp desktop app's `ChatStorage.sqlite`. Senders are named from WhatsApp's copy of the address book, then their profile name (`~Name`), then their phone number
+- `MACOS_MCP_WHATSAPP` switch, and a `whatsapp` module name for `MACOS_MCP_HTTP_TOOLSETS`
 - Text extraction from `attributedBody` blobs, so messages with a NULL `text` column read and search correctly
 - Tapbacks folded into the message they react to, including emoji tapbacks
 - `macos://messages/chats` resource and a texts section in `daily_briefing`
