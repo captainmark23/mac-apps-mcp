@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `npm run set-password`, `npm run new-client`, `scripts/install-launchd.sh`, `scripts/uninstall-launchd.sh` and `docs/connector-runbook.md`
 
 ### Changed
+- Connector runbook and `.env.example` use the standard HTTPS port for the public URL (claude.ai did not connect to `:8443`), with notes on adding the connector in claude.ai
+- `scripts/install-launchd.sh` retries `launchctl bootstrap`, which failed with an I/O error when re-run over a running service
 - README tool count corrected to 46, including the Notes tools
 - Server construction moved to `src/server.ts` so both transports build the same server
 

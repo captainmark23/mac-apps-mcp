@@ -198,7 +198,7 @@ export function getTransport(): "stdio" | "http" {
   return (process.env.MACOS_MCP_TRANSPORT || "").trim().toLowerCase() === "http" ? "http" : "stdio";
 }
 
-/** MACOS_MCP_HTTP_PORT: loopback port for the HTTP connector (default 8443, a Funnel port). */
+/** MACOS_MCP_HTTP_PORT: loopback port for the HTTP connector (default 8443; Funnel forwards the public port 443 to it). */
 export function getHttpPort(): number {
   const port = parseInt(process.env.MACOS_MCP_HTTP_PORT || "8443", 10);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -216,7 +216,7 @@ export function getPublicUrl(): URL {
   if (!val) throw new Error("MACOS_MCP_PUBLIC_URL is required for the HTTP transport.");
   const url = new URL(val);
   if (url.pathname !== "/" || url.search || url.hash) {
-    throw new Error("MACOS_MCP_PUBLIC_URL must be an origin with no path, e.g. https://host.example.ts.net:8443");
+    throw new Error("MACOS_MCP_PUBLIC_URL must be an origin with no path, e.g. https://host.example.ts.net");
   }
   return url;
 }
