@@ -63,7 +63,13 @@ EOF
 plutil -lint "$PLIST" >/dev/null
 
 # bootout + bootstrap (not kickstart) so a changed environment is picked up.
+# bootout returns before the old job is gone, and bootstrap then fails with
+# "Input/output error", so retry for a few seconds.
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-launchctl bootstrap "$DOMAIN" "$PLIST"
+for attempt in 1 2 3 4 5; do
+  launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null && break
+  [ "$attempt" = 5 ] && { echo "launchctl bootstrap failed; run: launchctl bootstrap $DOMAIN $PLIST" >&2; exit 1; }
+  sleep 2
+done
 echo "Started $LABEL with $NODE_BIN."
 echo "Check it: curl -s http://127.0.0.1:\${MACOS_MCP_HTTP_PORT:-8443}/healthz"

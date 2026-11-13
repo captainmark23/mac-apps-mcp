@@ -24,7 +24,7 @@ Replace `your-mac.your-tailnet.ts.net` with your Mac's Tailscale name (`tailscal
 2. `npm run set-password`. This stores a scrypt hash in `~/.macos-mcp/oauth-password` (mode 0600). The password itself is never stored.
 3. `npm run new-client`. This prints a client ID and secret and stores only a hash of the secret in `~/.macos-mcp/oauth-client` (mode 0600). The secret is shown once: keep it in your password manager for section 5.
 4. `cp .env.example .env` and set:
-   - `MACOS_MCP_PUBLIC_URL=https://your-mac.your-tailnet.ts.net:8443`
+   - `MACOS_MCP_PUBLIC_URL=https://your-mac.your-tailnet.ts.net` (the standard HTTPS port: claude.ai did not connect to `:8443`)
    - `MACOS_MCP_TAILSCALE_LOGIN` to your Tailscale login, which `tailscale whois --json $(tailscale ip -4)` shows as `UserProfile.LoginName`.
 
    - `MACOS_MCP_ALERT_TO` to your own iMessage phone number or email, for alerts (section 10).
@@ -48,16 +48,20 @@ Replace `your-mac.your-tailnet.ts.net` with your Mac's Tailscale name (`tailscal
    ```
 
    Narrow `target` to your Mac if you prefer.
-2. `tailscale funnel --bg --https=8443 http://127.0.0.1:8443`
-3. `tailscale funnel status` should list `https://your-mac.your-tailnet.ts.net:8443` as Funnel on.
-4. From a device off the tailnet (a phone on mobile data with Tailscale off): `https://your-mac.your-tailnet.ts.net:8443/healthz` returns `{"status":"ok"}`, and `/authorize` answers "Sign in from one of your own devices, connected to Tailscale."
+2. `tailscale funnel --bg --https=443 http://127.0.0.1:8443`. If Tailscale says Funnel is not enabled on the tailnet, open the link it prints and approve it.
+3. `tailscale funnel status` should list `https://your-mac.your-tailnet.ts.net` as Funnel on.
+4. From a device off the tailnet (a phone on mobile data with Tailscale off): `https://your-mac.your-tailnet.ts.net/healthz` returns `{"status":"ok"}`, and `/authorize` answers "Sign in from one of your own devices, connected to Tailscale."
 
 ## 5. Add the connector
 
 Sign in from a device with Tailscale on. Sign-in lasts 30 days and renews itself while the connector is in use.
 
-1. claude.ai: Customize > Connectors > Add custom connector. URL `https://your-mac.your-tailnet.ts.net:8443/mcp`. Under Advanced settings (or "Use your own OAuth client"), enter the client ID and secret from `npm run new-client`. Connect, enter the password on the page that opens, choose Allow. The connector then appears in Claude Desktop and the phone app on the same account.
-2. Claude Code: `claude mcp add --transport http --client-id <client ID> --client-secret mac-apps https://your-mac.your-tailnet.ts.net:8443/mcp`. It asks for the secret and keeps it in your keychain. Then run `/mcp` in Claude Code and sign in.
+1. claude.ai: Customize > Connectors > Add custom connector. URL `https://your-mac.your-tailnet.ts.net/mcp`. Under Advanced settings (or "Use your own OAuth client"), enter the client ID and secret from `npm run new-client`. Connect, enter the password on the page that opens, choose Allow. The connector then appears in Claude Desktop and the phone app on the same account.
+2. Claude Code: `claude mcp add --transport http --client-id <client ID> --client-secret mac-apps https://your-mac.your-tailnet.ts.net/mcp`. It asks for the secret and keeps it in your keychain. Then run `/mcp` in Claude Code and sign in.
+   - On a Team or Enterprise plan, an owner adds it under Admin settings > Connectors, then each person connects it from their own Customize > Connectors.
+   - The dialog's server check may say "Couldn't check the server". Choose Continue anyway and pick "Use your own OAuth client".
+   - A password manager may autofill the client ID and secret fields with the connector password entry. Check the ID starts with `mac-apps-mcp-` and the secret is the 43-character value before adding; the fields cannot be edited afterwards.
+   - `{"error":"invalid_client"}` in the browser means the client ID is wrong. "Authorization failed" after a successful sign-in means the client secret is wrong.
 3. Test from the phone with no desktop app involved: ask for today's calendar, a mail body search, and unread texts. Each call appears in `audit.log`.
 
 ## 6. Widen access
@@ -80,7 +84,7 @@ Sign in from a device with Tailscale on. Sign-in lasts 30 days and renews itself
 
 ## 9. Remove it
 
-1. `tailscale funnel --https=8443 off`
+1. `tailscale funnel --https=443 off`
 2. `scripts/uninstall-launchd.sh`
 3. Optionally delete `~/.macos-mcp/auth.json`, `audit.log`, `oauth-password` and `oauth-client`.
 
