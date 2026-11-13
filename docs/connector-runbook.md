@@ -27,13 +27,15 @@ Replace `your-mac.your-tailnet.ts.net` with your Mac's Tailscale name (`tailscal
    - `MACOS_MCP_PUBLIC_URL=https://your-mac.your-tailnet.ts.net:8443`
    - `MACOS_MCP_TAILSCALE_LOGIN` to your Tailscale login, which `tailscale whois --json $(tailscale ip -4)` shows as `UserProfile.LoginName`.
 
+   - `MACOS_MCP_ALERT_TO` to your own iMessage phone number or email, for alerts (section 10).
+
    Leave the read-only toolsets for the first week.
 
 ## 3. Start it
 
 1. `NODE_BIN=/path/to/node scripts/install-launchd.sh`
 2. `curl -s http://127.0.0.1:8443/healthz` should show `"status":"ok"` and both `readable` values `true`. If `readable` is `false`, the node binary lacks Full Disk Access (see section 8).
-3. Logs: `~/.macos-mcp/launchd.log` (process output), `~/.macos-mcp/macos-mcp.log` (server log), `~/.macos-mcp/audit.log` (one line per tool call: time, client, tool, hash of arguments).
+3. Logs: `~/.macos-mcp/launchd.log` (process output), `~/.macos-mcp/macos-mcp.log` (server log), `~/.macos-mcp/audit.log` (one line per tool call: time, client, caller address, tool, hash of arguments).
 
 ## 4. Enable Funnel
 
@@ -81,3 +83,17 @@ Sign in from a device with Tailscale on. Sign-in lasts 30 days and renews itself
 1. `tailscale funnel --https=8443 off`
 2. `scripts/uninstall-launchd.sh`
 3. Optionally delete `~/.macos-mcp/auth.json`, `audit.log`, `oauth-password` and `oauth-client`.
+
+## 10. Alerts
+
+With `MACOS_MCP_ALERT_TO` set, the server sends you an iMessage for:
+
+1. Each new sign-in, each wrong password, and a lockout, with the address it came from.
+2. The first call from each new network (IPv4 /24, IPv6 /48). Claude calls from a pool of addresses, so expect a few of these in the first days, then silence. One you cannot explain means a token is in use somewhere else: rotate the client secret (section 7).
+3. A daily digest at 08:00 on the Mac's clock: calls per tool and the networks they came from. No digest is sent for a day with no calls.
+
+Setup:
+
+1. Messages on the Mac must already have a conversation with that handle: text yourself once first.
+2. The first alert makes macOS ask whether node may control Messages. Allow it, on the Mac itself.
+3. A failed send is written to `~/.macos-mcp/macos-mcp.log` and never blocks a request. Known networks and the last digest time are kept in `~/.macos-mcp/alerts.json`.

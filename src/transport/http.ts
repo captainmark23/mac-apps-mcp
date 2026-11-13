@@ -21,8 +21,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { mcpAuthRouter, createOAuthMetadata, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { metadataHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/metadata.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
-import { getHttpPort, getHttpToolsets, getPublicUrl, getMailDbPath, getTailscaleLogin } from "../shared/config.js";
+import { getAlertHandle, getHttpPort, getHttpToolsets, getPublicUrl, getMailDbPath, getTailscaleLogin } from "../shared/config.js";
 import { createServer, SERVER_VERSION } from "../server.js";
+import { sendText } from "../messages/jxa.js";
+import { Alerts } from "./alerts.js";
 import { type ClientCredentials, readClient } from "./client.js";
 import { ConnectorAuth } from "./oauth.js";
 import { readPasswordHash } from "./password.js";
@@ -55,10 +57,11 @@ export function applyToolsets(server: McpServer, toolsets: Map<string, "all" | "
 }
 
 /**
- * Append one line per tool call: time, OAuth client, tool, and a hash of the
- * arguments. Never the arguments themselves, which can hold message text.
+ * Append one line per tool call: time, OAuth client, caller address, tool, and
+ * a hash of the arguments. Never the arguments themselves, which can hold
+ * message text.
  */
-export function auditToolCalls(server: McpServer, auditFile: string): void {
+export function auditToolCalls(server: McpServer, auditFile: string, ip?: string): void {
   const handlers = (server.server as unknown as { _requestHandlers: Map<string, RequestHandler> })._requestHandlers;
   const original = handlers.get("tools/call");
   if (!original) return;
@@ -66,6 +69,7 @@ export function auditToolCalls(server: McpServer, auditFile: string): void {
     const line = JSON.stringify({
       ts: new Date().toISOString(),
       client: extra.authInfo?.clientId ?? "",
+      ip: ip ?? "",
       tool: req.params.name ?? "",
       args_sha256: createHash("sha256").update(JSON.stringify(req.params.arguments ?? {})).digest("hex"),
     });
@@ -116,6 +120,8 @@ export interface HttpAppOptions {
   stateFile: string;
   auditFile: string;
   toolsets: Map<string, "all" | "read"> | null;
+  /** Owner alerts for sign-in events and new networks; none are sent without it. */
+  alerts?: Alerts;
   /** Builds the MCP server for each request (tests pass a small one). */
   serverFactory?: () => McpServer;
   log?: (message: string) => void;
@@ -125,6 +131,7 @@ export function createHttpApp(opts: HttpAppOptions): Express {
   const resource = new URL("/mcp", opts.publicUrl);
   const auth = new ConnectorAuth({
     stateFile: opts.stateFile, passwordHash: opts.passwordHash, client: opts.client, resource, log: opts.log,
+    notify: opts.alerts?.notify,
   });
   const factory = opts.serverFactory ?? (() => createServer({ resources: false }));
   const startedAt = Date.now();
@@ -197,7 +204,8 @@ export function createHttpApp(opts: HttpAppOptions): Express {
   app.post("/mcp", bearer, express.json({ limit: "4mb" }), async (req, res) => {
     const server = factory();
     applyToolsets(server, opts.toolsets);
-    auditToolCalls(server, opts.auditFile);
+    opts.alerts?.seen(req.ip);
+    auditToolCalls(server, opts.auditFile, req.ip);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       transport.close().catch(() => {});
@@ -247,20 +255,35 @@ export async function startHttp(log: (message: string) => void): Promise<void> {
   const publicUrl = getPublicUrl();
   const port = getHttpPort();
   const toolsets = getHttpToolsets();
+  const auditFile = join(STATE_DIR, "audit.log");
+  const alertHandle = getAlertHandle();
+  let alerts: Alerts | undefined;
+  if (alertHandle) {
+    alerts = new Alerts({
+      stateFile: join(STATE_DIR, "alerts.json"),
+      auditFile,
+      send: (text) => sendText({ handle: alertHandle, allowSms: false }, text),
+      log,
+    });
+  } else {
+    log("MACOS_MCP_ALERT_TO is not set, so no sign-in or new-network alerts are sent.");
+  }
   const app = createHttpApp({
     publicUrl,
     passwordHash,
     client,
     tailscaleLogin,
     stateFile: join(STATE_DIR, "auth.json"),
-    auditFile: join(STATE_DIR, "audit.log"),
+    auditFile,
     toolsets,
+    alerts,
     log,
   });
   await new Promise<void>((resolve, reject) => {
     const listener = app.listen(port, "127.0.0.1", () => resolve());
     listener.on("error", reject);
   });
+  alerts?.start();
   log(`HTTP connector listening on 127.0.0.1:${port} for ${publicUrl.origin}/mcp` +
     (toolsets ? ` (toolsets: ${[...toolsets].map(([m, mode]) => mode === "read" ? `${m}:read` : m).join(",")})` : ""));
 }

@@ -8,7 +8,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -19,6 +19,7 @@ import { hashPassword, verifyPassword } from "../transport/password.js";
 import { ConnectorAuth } from "../transport/oauth.js";
 import { newClient, verifyClientSecret } from "../transport/client.js";
 import { applyToolsets, createHttpApp, toolModule } from "../transport/http.js";
+import { Alerts, network } from "../transport/alerts.js";
 import { getHttpToolsets, getPublicUrl, getTransport } from "../shared/config.js";
 
 // ─── Password ────────────────────────────────────────────────────
@@ -167,6 +168,7 @@ describe("HTTP connector (loopback)", () => {
   let listener: Server;
   let accessToken: string;
   let refreshToken: string;
+  const sent: string[] = [];
   const { secret: clientSecret, record: client } = newClient();
   const clientId = client.clientId;
 
@@ -205,11 +207,12 @@ describe("HTTP connector (loopback)", () => {
   const token = (body: Record<string, string>, headers: Record<string, string> = {}) =>
     fetch(`${base}/token`, { method: "POST", headers: { ...formHeaders, ...headers }, body: form(body) });
 
-  const mcp = (accessToken: string | null, body: unknown) => fetch(`${base}/mcp`, {
+  const mcp = (accessToken: string | null, body: unknown, headers: Record<string, string> = {}) => fetch(`${base}/mcp`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
+      ...headers,
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
     body: JSON.stringify(body),
@@ -228,6 +231,10 @@ describe("HTTP connector (loopback)", () => {
       auditFile: join(dir, "audit.log"),
       toolsets: null,
       serverFactory: testServer,
+      alerts: new Alerts({
+        stateFile: join(dir, "alerts.json"), auditFile: join(dir, "audit.log"),
+        send: async (text) => { sent.push(text); },
+      }),
     });
     await new Promise<void>((resolve) => { listener = app.listen(port, "127.0.0.1", () => resolve()); });
   });
@@ -408,6 +415,21 @@ describe("HTTP connector (loopback)", () => {
     assert.equal(res.status, 400);
   });
 
+  it("alerts the owner on sign-in and on the first call from each new network", async () => {
+    assert.ok(sent.some((t) => /^mac-apps-mcp: New sign-in from /.test(t)));
+    const call = (ip: string) => mcp(accessToken, { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "mail_echo", arguments: { text: "x" } } }, { "X-Forwarded-For": ip });
+    const newNetwork = () => sent.filter((t) => t.includes("new network: 203.0.113.0/24"));
+    assert.equal((await mcp(null, { jsonrpc: "2.0", id: 9, method: "tools/list" }, { "X-Forwarded-For": "203.0.113.7" })).status, 401);
+    assert.equal(newNetwork().length, 0, "a call without a token raises no alert");
+    assert.equal((await call("203.0.113.7")).status, 200);
+    assert.equal((await call("203.0.113.99")).status, 200);
+    assert.deepEqual(newNetwork(), ["mac-apps-mcp: First call from a new network: 203.0.113.0/24 (203.0.113.7)."]);
+
+    const audit = readFileSync(join(dir, "audit.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(audit.filter((e) => e.ip === "203.0.113.99").length, 1);
+    assert.equal(statSync(join(dir, "alerts.json")).mode & 0o777, 0o600);
+  });
+
   it("stores only token hashes, in a 0600 file", () => {
     const raw = readFileSync(join(dir, "auth.json"), "utf8");
     assert.ok(!raw.includes(accessToken));
@@ -424,11 +446,69 @@ describe("HTTP connector (loopback)", () => {
 
   it("locks sign-in for 15 minutes after 5 wrong passwords", async () => {
     const { requestId } = await startAuthorization();
+    const before = sent.length;
     for (let i = 1; i <= 4; i++) assert.equal((await login(requestId, `wrong ${i} password`)).status, 401);
     assert.equal((await login(requestId, "wrong 5 password")).status, 429);
     const locked = await login(requestId, PASSWORD);
     assert.equal(locked.status, 429);
     assert.match(await locked.text(), /Try again in 15 minutes/);
+    assert.equal(sent.slice(before).filter((t) => t.includes("Wrong password on the sign-in page")).length, 4);
+    assert.ok(sent.some((t) => t.includes("(4/5)")));
+    assert.equal(sent.slice(before).filter((t) => t.includes("Sign-in locked for 15 minutes")).length, 1);
+  });
+});
+
+describe("connector alerts", () => {
+  it("groups addresses into networks", () => {
+    assert.equal(network("203.0.113.7"), "203.0.113.0/24");
+    assert.equal(network("::ffff:203.0.113.7"), "203.0.113.0/24");
+    assert.equal(network("2001:db8:12:3456::1"), "2001:db8:12::/48");
+    assert.equal(network("2001:0db8::1"), "2001:db8:0::/48");
+    assert.equal(network("::1"), "0:0:0::/48");
+  });
+
+  it("sends one digest a day, after 08:00, and none for a quiet day", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "macos-mcp-alerts-"));
+    try {
+      const auditFile = join(dir, "audit.log");
+      const sent: string[] = [];
+      const alerts = new Alerts({ stateFile: join(dir, "alerts.json"), auditFile, send: async (text) => { sent.push(text); } });
+      const at = (day: number, hour: number) => new Date(2026, 0, day, hour, 30);
+      const line = (when: Date, tool: string, ip: string) => `${JSON.stringify({ ts: when.toISOString(), client: "c", ip, tool, args_sha256: "0" })}\n`;
+      writeFileSync(auditFile, line(at(4, 12), "mail_search", "198.51.100.1") + line(at(5, 20), "mail_search", "203.0.113.7")
+        + line(at(5, 21), "mail_search", "203.0.113.8") + line(at(6, 7), "calendar_today", "198.51.100.1") + "not json\n");
+
+      alerts.digestIfDue(at(6, 7));
+      assert.equal(sent.length, 0, "not before 08:00");
+      alerts.digestIfDue(at(6, 8));
+      assert.deepEqual(sent, ["mac-apps-mcp: 3 calls in the last 24 hours. mail_search 2, calendar_today 1. Networks: 198.51.100.0/24, 203.0.113.0/24."]);
+      alerts.digestIfDue(at(6, 9));
+      assert.equal(sent.length, 1, "once a day");
+
+      // A restart keeps the last digest time; a day with no calls sends nothing.
+      const restarted = new Alerts({ stateFile: join(dir, "alerts.json"), auditFile, send: async (text) => { sent.push(text); } });
+      restarted.digestIfDue(at(6, 10));
+      restarted.digestIfDue(at(7, 8));
+      assert.equal(sent.length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs a failed send instead of throwing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "macos-mcp-alerts-"));
+    try {
+      const logged: string[] = [];
+      const alerts = new Alerts({
+        stateFile: join(dir, "alerts.json"), auditFile: join(dir, "audit.log"),
+        send: async () => { throw new Error("Messages is closed"); }, log: (m) => logged.push(m),
+      });
+      alerts.seen("203.0.113.7");
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.match(logged[0], /Alert not sent \(Messages is closed\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -80,6 +80,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `MACOS_MCP_PUBLIC_URL` | Public origin of the connector, no path (required for `http`); the MCP endpoint is `<url>/mcp` | Not set |
 | `MACOS_MCP_HTTP_TOOLSETS` | Modules exposed over HTTP, e.g. `mail:read,messages`; `:read` keeps only read-only tools | All |
 | `MACOS_MCP_TAILSCALE_LOGIN` | Tailscale login allowed to sign in; the sign-in page then answers only that tailnet user, never Funnel traffic | Not set (sign-in page open to anyone with the URL) |
+| `MACOS_MCP_ALERT_TO` | Your own iMessage handle; the HTTP connector texts it on each sign-in, wrong password, lockout and first call from a new network, plus a daily digest | Not set (no alerts) |
 | `MACOS_MCP_OAUTH_PASSWORD_HASH` | Connector password hash, overriding `~/.macos-mcp/oauth-password` from `npm run set-password` | Not set |
 | `MACOS_MCP_MESSAGES_HANDLES_ALLOWLIST` | Comma-separated phone numbers or emails `messages_send` may text (`*` wildcards allowed); every participant of a group must match | Not set (any) |
 
@@ -240,7 +241,7 @@ With `MACOS_MCP_TRANSPORT=http` the server speaks Streamable HTTP on `127.0.0.1`
 2. One password, stored as a scrypt hash by `npm run set-password`. Five wrong attempts lock sign-in for 15 minutes.
 3. With `MACOS_MCP_TAILSCALE_LOGIN` set, the sign-in page answers only your own Tailscale login, so nobody reaching the server through Funnel can try a password. Recommended whenever you use Tailscale.
 4. Codes go only to Claude's callback (`https://claude.ai/api/mcp/auth_callback`, and the `claude.com` form) or Claude Code's loopback `/callback`. PKCE (S256) is required. Access tokens last 1 hour; refresh tokens 30 days and rotate on use. Only token hashes are stored, in `~/.macos-mcp/auth.json` (0600).
-5. Every tool call is logged to `~/.macos-mcp/audit.log` with the client, tool and a hash of the arguments, never the arguments.
+5. Every tool call is logged to `~/.macos-mcp/audit.log` with the client, caller address, tool and a hash of the arguments, never the arguments. With `MACOS_MCP_ALERT_TO` set, the server also texts you on each sign-in, wrong password, lockout and first call from a new network, and sends a daily digest of calls.
 6. The server answers only its public host name, so a web page cannot reach it by rebinding its own name to `127.0.0.1`. `/healthz` reports version, uptime and whether the Mail and Messages databases are readable to a local check, and only `{"status":"ok"}` through the tunnel.
 7. MCP resources are not exposed over HTTP; tools cover the same data and are audited.
 
@@ -284,6 +285,7 @@ src/
   server.ts             # Builds the MCP server (all tools, resources, daily briefing)
   transport/
     http.ts             # Streamable HTTP transport, health, toolsets, audit log
+    alerts.ts           # Owner alerts: sign-in events, new networks, daily digest
     oauth.ts            # Single-user OAuth 2.1 provider and sign-in page
     client.ts           # The one OAuth client and its hashed secret
     new-client.ts       # npm run new-client
