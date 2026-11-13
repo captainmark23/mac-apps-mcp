@@ -10,7 +10,8 @@
  * - A daily digest of the audit log: calls per tool and the networks they came
  *   from. Nothing is sent for a day with no calls.
  *
- * Sending never blocks or fails a request; a failed send is logged.
+ * Alerts never block or fail a request: sends run one at a time in the
+ * background, and a failed send or state write is only logged.
  */
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -66,17 +67,26 @@ export class Alerts {
     return { networks: {} };
   }
 
+  /** Persist state. A failure is logged; the in-memory state still stops repeat alerts until restart. */
   private save(): void {
-    const tmp = `${this.opts.stateFile}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.state), { mode: 0o600 });
-    renameSync(tmp, this.opts.stateFile);
+    try {
+      const tmp = `${this.opts.stateFile}.tmp`;
+      writeFileSync(tmp, JSON.stringify(this.state), { mode: 0o600 });
+      renameSync(tmp, this.opts.stateFile);
+    } catch (e) {
+      this.opts.log?.(`Alert state not saved: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
-  /** Send one alert in the background. */
+  private sendTail: Promise<unknown> = Promise.resolve();
+
+  /** Send one alert in the background, after any alert already being sent. */
   readonly notify = (text: string): void => {
-    this.opts.send(`mac-apps-mcp: ${text}`).catch((e: unknown) => {
-      this.opts.log?.(`Alert not sent (${e instanceof Error ? e.message : String(e)}): ${text}`);
-    });
+    this.sendTail = this.sendTail
+      .then(() => this.opts.send(`mac-apps-mcp: ${text}`))
+      .catch((e: unknown) => {
+        this.opts.log?.(`Alert not sent (${e instanceof Error ? e.message : String(e)}): ${text}`);
+      });
   };
 
   /** Record an authenticated call; alert if its network is new. */

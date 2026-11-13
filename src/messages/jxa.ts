@@ -11,7 +11,7 @@
  * - There is no command to mark a chat read.
  */
 
-import { executeJxaWrite, jxaString } from "../shared/applescript.js";
+import { executeJxa, executeJxaWrite, jxaString } from "../shared/applescript.js";
 
 export interface SendTarget {
   /** chat.guid of an existing chat; tried first. */
@@ -27,8 +27,17 @@ export type SendVia = "chat" | "iMessage" | "SMS";
 
 const SEND_TIMEOUT_MS = 30_000;
 
-export async function sendText(target: SendTarget, text: string): Promise<SendVia> {
-  const result = await executeJxaWrite<{ via?: SendVia; error?: string }>(`
+/**
+ * `run` is how the script executes. Tool sends use the shared write queue and
+ * rate limit; connector alerts pass executeJxa so they never spend that budget
+ * or hold tool writes behind them.
+ */
+export async function sendText(
+  target: SendTarget,
+  text: string,
+  run: typeof executeJxa = executeJxaWrite
+): Promise<SendVia> {
+  const result = await run<{ via?: SendVia; error?: string }>(`
     const Messages = Application("Messages");
     const chatGuid = ${jxaString(target.chatGuid ?? "")};
     const handle = ${jxaString(target.handle ?? "")};

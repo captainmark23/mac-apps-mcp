@@ -481,6 +481,7 @@ describe("connector alerts", () => {
       alerts.digestIfDue(at(6, 7));
       assert.equal(sent.length, 0, "not before 08:00");
       alerts.digestIfDue(at(6, 8));
+      await new Promise((resolve) => setImmediate(resolve));
       assert.deepEqual(sent, ["mac-apps-mcp: 3 calls in the last 24 hours. mail_search 2, calendar_today 1. Networks: 198.51.100.0/24, 203.0.113.0/24."]);
       alerts.digestIfDue(at(6, 9));
       assert.equal(sent.length, 1, "once a day");
@@ -489,6 +490,7 @@ describe("connector alerts", () => {
       const restarted = new Alerts({ stateFile: join(dir, "alerts.json"), auditFile, send: async (text) => { sent.push(text); } });
       restarted.digestIfDue(at(6, 10));
       restarted.digestIfDue(at(7, 8));
+      await new Promise((resolve) => setImmediate(resolve));
       assert.equal(sent.length, 1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -506,6 +508,17 @@ describe("connector alerts", () => {
       alerts.seen("203.0.113.7");
       await new Promise((resolve) => setImmediate(resolve));
       assert.match(logged[0], /Alert not sent \(Messages is closed\)/);
+
+      // An unwritable state file is logged too, and the alert still goes out.
+      const sent: string[] = [];
+      const stuck = new Alerts({
+        stateFile: join(dir, "missing", "alerts.json"), auditFile: join(dir, "audit.log"),
+        send: async (text) => { sent.push(text); }, log: (m) => logged.push(m),
+      });
+      stuck.seen("198.51.100.1");
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.match(logged[1], /Alert state not saved/);
+      assert.equal(sent.length, 1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

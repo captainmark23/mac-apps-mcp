@@ -24,6 +24,7 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import { getAlertHandle, getHttpPort, getHttpToolsets, getPublicUrl, getMailDbPath, getTailscaleLogin } from "../shared/config.js";
 import { createServer, SERVER_VERSION } from "../server.js";
 import { sendText } from "../messages/jxa.js";
+import { executeJxa } from "../shared/applescript.js";
 import { Alerts } from "./alerts.js";
 import { type ClientCredentials, readClient } from "./client.js";
 import { ConnectorAuth } from "./oauth.js";
@@ -262,7 +263,8 @@ export async function startHttp(log: (message: string) => void): Promise<void> {
     alerts = new Alerts({
       stateFile: join(STATE_DIR, "alerts.json"),
       auditFile,
-      send: (text) => sendText({ handle: alertHandle, allowSms: false }, text),
+      // executeJxa, not the tool write queue: alerts must not spend the write rate limit.
+      send: (text) => sendText({ handle: alertHandle, allowSms: false }, text, executeJxa),
       log,
     });
   } else {
