@@ -14,7 +14,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readdirSync, existsSync } from "node:fs";
+import { readdirSync, existsSync, openSync, closeSync } from "node:fs";
 import { sqlLikeEscape } from "./sqlite.js";
 
 export function getCalendarNames(): string[] | null {
@@ -163,6 +163,34 @@ export function getMessagesDbPath(): string {
   return dbPath;
 }
 
+// ─── WhatsApp Configuration ──────────────────────────────────────
+
+/** WhatsApp module switch. MACOS_MCP_WHATSAPP=off|false|0 disables it; on by default. */
+export function isWhatsAppEnabled(): boolean {
+  const val = (process.env.MACOS_MCP_WHATSAPP || "").trim().toLowerCase();
+  return !(val === "off" || val === "false" || val === "0");
+}
+
+/**
+ * The WhatsApp desktop app's chat history and its copy of the address book.
+ * Throws a message saying whether the app's data is missing or unreadable;
+ * the contacts database is optional and only checked when it is opened.
+ */
+export function getWhatsAppDbPaths(): { chats: string; contacts: string } {
+  const dir = join(homedir(), "Library/Group Containers/group.net.whatsapp.WhatsApp.shared");
+  const chats = join(dir, "ChatStorage.sqlite");
+  try {
+    closeSync(openSync(chats, "r"));
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EPERM" || code === "EACCES") {
+      throw new Error("Cannot read the WhatsApp database: this process needs Full Disk Access (System Settings > Privacy & Security > Full Disk Access).");
+    }
+    throw new Error("WhatsApp database not found. WhatsApp must be installed and signed in on this Mac.");
+  }
+  return { chats, contacts: join(dir, "ContactsV2.sqlite") };
+}
+
 // ─── HTTP Connector Configuration ────────────────────────────────
 
 /** MACOS_MCP_TRANSPORT: "stdio" (default) or "http". */
@@ -204,7 +232,7 @@ export function getTailscaleLogin(): string | null {
 
 /**
  * MACOS_MCP_HTTP_TOOLSETS: modules exposed over HTTP, e.g. "mail:read,messages".
- * Modules: mail, calendar, reminders, contacts, notes, messages, briefing.
+ * Modules: mail, calendar, reminders, contacts, notes, messages, whatsapp, briefing.
  * A ":read" suffix keeps only that module's read-only tools. Unset means all.
  */
 export function getHttpToolsets(): Map<string, "all" | "read"> | null {

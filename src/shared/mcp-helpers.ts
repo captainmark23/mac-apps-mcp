@@ -126,6 +126,9 @@ export function paginatedOutput<T extends z.ZodTypeAny>(itemSchema: T) {
     items: z.array(itemSchema),
     has_more: z.boolean(),
     next_offset: z.number().optional(),
+    // Set by ok() when a response is cut to fit; without it here, strict
+    // clients reject the truncated result as not matching the schema.
+    truncation_message: z.string().optional(),
   };
 }
 

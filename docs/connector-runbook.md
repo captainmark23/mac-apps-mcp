@@ -60,7 +60,7 @@ Sign in from a device with Tailscale on. Sign-in lasts 30 days and renews itself
 
 ## 6. Widen access
 
-1. Edit `MACOS_MCP_HTTP_TOOLSETS` in `.env`. Modules are `mail`, `calendar`, `reminders`, `contacts`, `notes`, `messages` and `briefing`; a `:read` suffix keeps only that module's read-only tools. Remove the line to expose everything.
+1. Edit `MACOS_MCP_HTTP_TOOLSETS` in `.env`. Modules are `mail`, `calendar`, `reminders`, `contacts`, `notes`, `messages`, `whatsapp` and `briefing`; a `:read` suffix keeps only that module's read-only tools. Remove the line to expose everything.
 2. Keep `MACOS_MCP_CONFIRM_DESTRUCTIVE=true` so sends and deletes need `confirm: true` from the model.
 3. Re-run `scripts/install-launchd.sh` to apply.
 
