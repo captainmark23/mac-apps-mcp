@@ -231,6 +231,15 @@ export function getTailscaleLogin(): string | null {
 }
 
 /**
+ * MACOS_MCP_ALERT_TO: the owner's own iMessage handle (phone or email). The
+ * HTTP connector texts it on sign-in events and new networks, plus a daily
+ * digest. Unset means no alerts.
+ */
+export function getAlertHandle(): string | null {
+  return process.env.MACOS_MCP_ALERT_TO?.trim() || null;
+}
+
+/**
  * MACOS_MCP_HTTP_TOOLSETS: modules exposed over HTTP, e.g. "mail:read,messages".
  * Modules: mail, calendar, reminders, contacts, notes, messages, whatsapp, briefing.
  * A ":read" suffix keeps only that module's read-only tools. Unset means all.

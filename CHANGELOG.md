@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Contact name lookup across every address book source, matching phone numbers in E.164
 - Remote connector: Streamable HTTP transport (`MACOS_MCP_TRANSPORT=http`) bound to loopback, with a single-user OAuth 2.1 server (one pre-created client whose secret is required at the token endpoint, no registration endpoint, PKCE, rotating refresh tokens, login lockout), a check that requests name the public host, `/healthz`, per-module toolsets and an audit log of tool calls
 - `MACOS_MCP_TAILSCALE_LOGIN`: the sign-in page answers only the owner's Tailscale login, so it cannot be reached through Funnel
+- `MACOS_MCP_ALERT_TO`: the HTTP connector texts the owner by iMessage on each sign-in, wrong password, lockout and first call from a new network, and sends a daily digest of audited calls. The audit log now records the caller address
 - `npm run set-password`, `npm run new-client`, `scripts/install-launchd.sh`, `scripts/uninstall-launchd.sh` and `docs/connector-runbook.md`
 
 ### Changed

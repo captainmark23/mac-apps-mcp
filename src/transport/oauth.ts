@@ -94,6 +94,8 @@ export interface ConnectorAuthOptions {
   /** The one client allowed to sign in. Replacing it invalidates every token. */
   client: ClientCredentials;
   log?: (message: string) => void;
+  /** Tells the owner about sign-ins, wrong passwords and lockouts. */
+  notify?: (message: string) => void;
 }
 
 export class ConnectorAuth implements OAuthServerProvider {
@@ -264,8 +266,10 @@ ${error ? `<p class="err">${escapeHtml(error)}</p>` : ""}
         this.failures = 0;
         this.lockedUntil = now + LOCKOUT_MS;
         this.opts.log?.("OAuth login locked for 15 minutes");
+        this.opts.notify?.(`Sign-in locked for 15 minutes after ${MAX_FAILURES} wrong passwords, the last from ${req.ip}.`);
         this.renderLogin(res, 429, requestId, "Too many failed attempts. Try again in 15 minutes.");
       } else {
+        this.opts.notify?.(`Wrong password on the sign-in page (${this.failures}/${MAX_FAILURES}) from ${req.ip}.`);
         this.renderLogin(res, 401, requestId, "Wrong password.");
       }
       return;
@@ -285,6 +289,7 @@ ${error ? `<p class="err">${escapeHtml(error)}</p>` : ""}
     };
     this.save();
     this.opts.log?.(`OAuth login succeeded for client ${client.client_id}`);
+    this.opts.notify?.(`New sign-in from ${req.ip}.`);
 
     const target = new URL(params.redirectUri);
     target.searchParams.set("code", code);
